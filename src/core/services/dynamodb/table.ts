@@ -62,6 +62,16 @@ export interface LaneTickResult {
   readonly partitions: readonly PartitionLaneResult[];
 }
 
+/** レーンの静的な諸元 (tick に依存しない値)。 */
+export interface LaneInfo {
+  /** 頭割りしたときの 1 パーティションあたりの取り分 (units/秒)。 */
+  readonly baselineUnitsPerSec: number;
+  /** 1 パーティションの物理上限 (units/秒)。3,000 (read) / 1,000 (write)。 */
+  readonly hardCapUnitsPerSec: number;
+  /** 1 パーティションが貯められるバーストの上限 (units)。 */
+  readonly burstCapacityUnits: number;
+}
+
 export interface DynamoDbTickResult {
   readonly timeSeconds: number;
   readonly read: LaneTickResult;
@@ -169,6 +179,17 @@ export class DynamoDbTable {
     return this.#elapsedSeconds;
   }
 
+  /**
+   * レーンの静的な諸元。tick ごとに変わらないので、
+   * View が「柱の高さの基準」「ゲージの満タン」を決めるのに使う。
+   */
+  get lanes(): { readonly read: LaneInfo; readonly write: LaneInfo } {
+    return {
+      read: toLaneInfo(this.#readLane),
+      write: toLaneInfo(this.#writeLane),
+    };
+  }
+
   /** シミュレーションを 1 tick 進める。 */
   step(demand: Demand, dtSeconds: number): DynamoDbTickResult {
     const readUnitsDemand = Math.max(0, demand.readsPerSecond) * this.#readUnitsPerRequest;
@@ -264,6 +285,14 @@ function resolveCapacity(capacity: CapacityConfig): ResolvedCapacity {
     sizingReadUnits: capacity.peakReadUnitsPerSec,
     sizingWriteUnits: capacity.peakWriteUnitsPerSec,
     adaptive: true,
+  };
+}
+
+function toLaneInfo(lane: CapacityLane): LaneInfo {
+  return {
+    baselineUnitsPerSec: lane.baselineRatePerSec,
+    hardCapUnitsPerSec: lane.hardCapUnitsPerSec,
+    burstCapacityUnits: lane.burstCapacityUnits,
   };
 }
 
