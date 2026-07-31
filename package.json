@@ -1,0 +1,21 @@
+{
+  "name": "aws-terrarium",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "AWS の主要サービスをブラウザ内エミュレータで再現し、three.js 空間で負荷をかけて挙動を体感する学習アプリ",
+  "license": "MIT",
+  "author": "bubbleShaker",
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "scenario": "tsx src/core/cli/runScenario.ts",
+    "check": "npm run typecheck && npm test"
+  },
+  "devDependencies": {
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.4"
+  }
+}
