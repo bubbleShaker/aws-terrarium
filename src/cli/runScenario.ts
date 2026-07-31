@@ -7,8 +7,8 @@
  *   npm run scenario              全プリセットを実行
  *   npm run scenario single-hot-key   1 つだけ実行し、パーティションの内訳も出す
  */
-import { findPreset, presets } from '../scenario/presets.js';
-import { runScenario, type ScenarioResult } from '../scenario/runScenario.js';
+import { findPreset, presets } from '../core/scenario/presets.js';
+import { runScenario, type ScenarioResult } from '../core/scenario/runScenario.js';
 
 function formatPercent(value: number): string {
   return `${(value * 100).toFixed(1)}%`;
@@ -68,8 +68,10 @@ function printPartitionBreakdown(result: ScenarioResult): void {
     .sort((a, b) => b.demandedUnitsPerSec - a.demandedUnitsPerSec)
     .slice(0, 8);
 
+  console.log('  バーは物理上限 (1 パーティションの壁) に対する需要の比率。20 個で上限到達。');
   for (const partition of sorted) {
-    const bar = '█'.repeat(Math.min(30, Math.round(partition.utilization * 10)));
+    const filled = Math.min(20, Math.round(partition.utilizationVsHardCap * 20));
+    const bar = '█'.repeat(filled) + '·'.repeat(Math.max(0, 20 - filled));
     const state = partition.throttledUnitsPerSec > 0.001 ? '⛔' : '  ';
     console.log(
       `  ${state} P#${String(partition.index).padStart(2)} ` +

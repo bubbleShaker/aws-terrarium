@@ -1,5 +1,6 @@
 import type { Demand } from '../../sim/demand.js';
-import { CapacityLane, type PartitionLaneResult } from './capacityLane.js';
+import { type AllocatorContext, createAllocator } from './allocator.js';
+import { CapacityLane, type LaneStepResult, type PartitionLaneResult } from './capacityLane.js';
 import type { KeyWeights } from './keyDistribution.js';
 import {
   PARTITION_MAX_READ_UNITS_PER_SEC,
@@ -18,12 +19,17 @@ import { assignKeysToPartitions, estimatePartitionCount, foldKeyWeightsToPartiti
  * テーブル単位の上限 (既定 40,000) は残るし、
  * **1 パーティション 3,000/1,000 の物理上限は provisioned とまったく同じ**。
  * on-demand にしてもホットパーティション問題は消えない、というのが体感してほしい点。
+ *
+ * なお on-demand ではアダプティブキャパシティが常に有効なので、
+ * この型には `adaptiveCapacity` 相当の設定を持たせていない
+ * （持たせると「切っても効かないスイッチ」ができてしまう）。
  */
 export type CapacityConfig =
   | {
       readonly mode: 'provisioned';
       readonly readCapacityUnits: number;
       readonly writeCapacityUnits: number;
+      readonly adaptiveCapacity: boolean;
     }
   | {
       /** 過去のピーク。DynamoDB はこれをもとにパーティションを用意しておく。 */
@@ -39,8 +45,12 @@ export interface DynamoDbTableConfig {
   readonly itemSizeKb: number;
   /** 強整合性読み取りか。結果整合性なら消費ユニットは半分。 */
   readonly consistentRead: boolean;
-  readonly adaptiveCapacity: boolean;
   readonly keyWeights: KeyWeights;
+  /**
+   * バーストの初期貯金 (units)。省略時は満タン。
+   * 満タン開始は「開始前にテーブルは 300 秒以上暇だった」という想定。
+   */
+  readonly initialBurstTokens?: number | undefined;
 }
 
 export interface LaneTickResult {
@@ -66,28 +76,28 @@ export interface DynamoDbTickResult {
  * > テーブル全体に 40,000 WCU を積んでも、1 つのパーティションキーに集中したら
  * > **1,000 WCU で頭打ち**になる。アダプティブキャパシティは偏りを救ってくれるが、
  * > 単一キーは分割できないので救いきれない。
+ *
+ * ⚠️ モデル上の単純化: バーストの貯金はパーティション単位でしか制限していないため、
+ * 全パーティションが同時に貯金を放出すると、瞬間的にはテーブルの
+ * プロビジョニング値を超える量が通る。実機の会計もパーティション単位なので
+ * 方向としては正しいが、テーブル単位の瞬間上限は本モデルには無い。
  */
 export class DynamoDbTable {
-  readonly #config: DynamoDbTableConfig;
   readonly #partitionCount: number;
   readonly #partitionWeights: readonly number[];
   readonly #readLane: CapacityLane;
   readonly #writeLane: CapacityLane;
   readonly #readUnitsPerRequest: number;
   readonly #writeUnitsPerRequest: number;
+  readonly #adaptiveCapacity: boolean;
   #elapsedSeconds = 0;
 
   constructor(config: DynamoDbTableConfig) {
-    if (config.keyWeights.length < 1) {
-      throw new RangeError('keyWeights は 1 要素以上である必要がある');
-    }
-    if (config.itemSizeKb <= 0) {
-      throw new RangeError(`itemSizeKb は正の数である必要がある: ${config.itemSizeKb}`);
-    }
-    this.#config = config;
+    validateConfig(config);
 
-    const { tableReadCapacity, tableWriteCapacity, sizingReadUnits, sizingWriteUnits } =
+    const { tableReadCapacity, tableWriteCapacity, sizingReadUnits, sizingWriteUnits, adaptive } =
       resolveCapacity(config.capacity);
+    this.#adaptiveCapacity = adaptive;
 
     this.#partitionCount = estimatePartitionCount({
       readUnitsPerSec: sizingReadUnits,
@@ -102,21 +112,16 @@ export class DynamoDbTable {
       this.#partitionCount,
     );
 
-    // on-demand は常にアダプティブキャパシティが効く（公式: adaptive capacity applies to on-demand mode）。
-    const adaptive = config.capacity.mode === 'on-demand' ? true : config.adaptiveCapacity;
-
-    this.#readLane = new CapacityLane({
-      partitionCount: this.#partitionCount,
-      perPartitionMaxPerSec: PARTITION_MAX_READ_UNITS_PER_SEC,
-      tableCapacityPerSec: tableReadCapacity,
-      adaptiveCapacity: adaptive,
-    });
-    this.#writeLane = new CapacityLane({
-      partitionCount: this.#partitionCount,
-      perPartitionMaxPerSec: PARTITION_MAX_WRITE_UNITS_PER_SEC,
-      tableCapacityPerSec: tableWriteCapacity,
-      adaptiveCapacity: adaptive,
-    });
+    this.#readLane = this.#createLane(
+      { partitionCount: this.#partitionCount, tableCapacityPerSec: tableReadCapacity, perPartitionMaxPerSec: PARTITION_MAX_READ_UNITS_PER_SEC },
+      adaptive,
+      config.initialBurstTokens,
+    );
+    this.#writeLane = this.#createLane(
+      { partitionCount: this.#partitionCount, tableCapacityPerSec: tableWriteCapacity, perPartitionMaxPerSec: PARTITION_MAX_WRITE_UNITS_PER_SEC },
+      adaptive,
+      config.initialBurstTokens,
+    );
 
     this.#readUnitsPerRequest = readUnitsPerRequest(config.itemSizeKb, config.consistentRead);
     this.#writeUnitsPerRequest = writeUnitsPerRequest(config.itemSizeKb);
@@ -129,6 +134,14 @@ export class DynamoDbTable {
   /** 各パーティションが受け持つトラフィックの割合。合計 1。 */
   get partitionWeights(): readonly number[] {
     return this.#partitionWeights;
+  }
+
+  /**
+   * 実際に効いているアダプティブキャパシティの値。
+   * on-demand では設定に関わらず常に true になるため、実効値を公開しておく。
+   */
+  get adaptiveCapacity(): boolean {
+    return this.#adaptiveCapacity;
   }
 
   get readUnitsPerRequest(): number {
@@ -160,9 +173,52 @@ export class DynamoDbTable {
     };
   }
 
+  #createLane(
+    context: AllocatorContext,
+    adaptive: boolean,
+    initialBurstTokens: number | undefined,
+  ): CapacityLane {
+    return new CapacityLane({
+      ...context,
+      allocator: createAllocator(context, adaptive),
+      initialBurstTokens,
+    });
+  }
+
   /** テーブル全体の需要をパーティションごとの需要へ配分する。 */
   #spread(totalUnitsPerSec: number): number[] {
     return this.#partitionWeights.map((weight) => totalUnitsPerSec * weight);
+  }
+}
+
+function validateConfig(config: DynamoDbTableConfig): void {
+  if (config.keyWeights.length < 1) {
+    throw new RangeError('keyWeights は 1 要素以上である必要がある');
+  }
+  requirePositive(config.itemSizeKb, 'itemSizeKb');
+  requireNonNegative(config.tableSizeGb, 'tableSizeGb');
+  if (config.initialBurstTokens !== undefined) {
+    requireNonNegative(config.initialBurstTokens, 'initialBurstTokens');
+  }
+
+  if (config.capacity.mode === 'provisioned') {
+    requireNonNegative(config.capacity.readCapacityUnits, 'readCapacityUnits');
+    requireNonNegative(config.capacity.writeCapacityUnits, 'writeCapacityUnits');
+  } else {
+    requireNonNegative(config.capacity.peakReadUnitsPerSec, 'peakReadUnitsPerSec');
+    requireNonNegative(config.capacity.peakWriteUnitsPerSec, 'peakWriteUnitsPerSec');
+  }
+}
+
+function requirePositive(value: number, name: string): void {
+  if (!Number.isFinite(value) || value <= 0) {
+    throw new RangeError(`${name} は正の有限数である必要がある: ${value}`);
+  }
+}
+
+function requireNonNegative(value: number, name: string): void {
+  if (!Number.isFinite(value) || value < 0) {
+    throw new RangeError(`${name} は 0 以上の有限数である必要がある: ${value}`);
   }
 }
 
@@ -173,6 +229,7 @@ interface ResolvedCapacity {
   /** パーティション数の見積もりに使う値 (units/秒)。 */
   readonly sizingReadUnits: number;
   readonly sizingWriteUnits: number;
+  readonly adaptive: boolean;
 }
 
 function resolveCapacity(capacity: CapacityConfig): ResolvedCapacity {
@@ -182,21 +239,22 @@ function resolveCapacity(capacity: CapacityConfig): ResolvedCapacity {
       tableWriteCapacity: capacity.writeCapacityUnits,
       sizingReadUnits: capacity.readCapacityUnits,
       sizingWriteUnits: capacity.writeCapacityUnits,
+      adaptive: capacity.adaptiveCapacity,
     };
   }
-  // on-demand: テーブル単位の既定上限まで使えるが、パーティションは過去のピークぶんしか用意されていない。
+  // on-demand: テーブル単位の既定上限まで使えるが、
+  // パーティションは過去のピークぶんしか用意されていない。
+  // アダプティブキャパシティは常に有効（公式: adaptive capacity applies to on-demand mode）。
   return {
     tableReadCapacity: TABLE_DEFAULT_MAX_READ_UNITS_PER_SEC,
     tableWriteCapacity: TABLE_DEFAULT_MAX_WRITE_UNITS_PER_SEC,
     sizingReadUnits: capacity.peakReadUnitsPerSec,
     sizingWriteUnits: capacity.peakWriteUnitsPerSec,
+    adaptive: true,
   };
 }
 
-function toLaneTickResult(
-  lane: { demandedUnitsPerSec: number; acceptedUnitsPerSec: number; throttledUnitsPerSec: number; partitions: readonly PartitionLaneResult[] },
-  unitsPerRequest: number,
-): LaneTickResult {
+function toLaneTickResult(lane: LaneStepResult, unitsPerRequest: number): LaneTickResult {
   const demanded = lane.demandedUnitsPerSec / unitsPerRequest;
   const accepted = lane.acceptedUnitsPerSec / unitsPerRequest;
   const throttled = lane.throttledUnitsPerSec / unitsPerRequest;

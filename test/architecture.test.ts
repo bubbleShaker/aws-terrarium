@@ -70,6 +70,33 @@ describe('Core 層の独立性', () => {
     expect(violations).toEqual([]);
   });
 
+  it('src/core は I/O を持たない（console / process / DOM グローバル）', async () => {
+    // import だけ見ていてもグローバル経由の I/O は素通りする。
+    // CLI を src/core に置いてしまった実績があるので、識別子レベルでも塞ぐ。
+    const forbiddenGlobals = [
+      /\bconsole\s*\./,
+      /\bprocess\s*\./,
+      /\bdocument\s*\./,
+      /\bwindow\s*\./,
+      /\blocalStorage\b/,
+      /\bfetch\s*\(/,
+    ];
+
+    const files = await collectTsFiles(CORE_DIR);
+    const violations: string[] = [];
+    for (const file of files) {
+      const source = await readFile(file, 'utf8');
+      // 行コメント・ブロックコメントは対象外にする（解説文に単語が出てくるため）。
+      const code = source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
+      for (const pattern of forbiddenGlobals) {
+        if (pattern.test(code)) {
+          violations.push(`${relative(CORE_DIR, file)} → ${pattern.source}`);
+        }
+      }
+    }
+    expect(violations).toEqual([]);
+  });
+
   it('src/core は View 層 (src/view) を import していない', async () => {
     const files = await collectTsFiles(CORE_DIR);
     const violations: string[] = [];

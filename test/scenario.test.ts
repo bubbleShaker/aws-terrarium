@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 import {
   bigItemTrap,
   singleHotKey,
+  singleHotKeyWithoutAdaptive,
+  uniformAtFullCapacity,
   uniformHealthy,
   zipfWithAdaptive,
   zipfWithoutAdaptive,
@@ -13,23 +15,44 @@ import { runScenario } from '../src/core/scenario/runScenario.js';
  * プリセットの数値を後から触ったときに、主張が崩れたら落ちるようにしてある。
  */
 describe('教材シナリオが主張どおりに振る舞う', () => {
-  it('uniform: キーが均等なら 40,000 WCU は 40,000 WCU として使える', () => {
+  it('uniform: キーが均等ならスロットルは起きない', () => {
     const { summary } = runScenario(uniformHealthy);
-    expect(summary.partitionCount).toBe(40);
+    expect(summary.partitionCount).toBe(41);
     expect(summary.write.throttleRate).toBeLessThan(0.001);
+  });
+
+  it('uniform: プロビジョニング値いっぱいまで流すと、均等キーでも溢れる', () => {
+    // ハッシュ分散のむらで最も重いパーティションが物理上限に当たる。
+    // 「均等に設計したのに 100% 使えない」ことを主張どおりの負荷で検証する。
+    const { summary } = runScenario(uniformAtFullCapacity);
+    expect(summary.write.throttleRate).toBeGreaterThan(0.01);
+
+    const hottest = summary.write.hottest!;
+    expect(hottest.trafficShare).toBeGreaterThan(summary.idealShare);
+    expect(hottest.throttleRate).toBeGreaterThan(0.05);
   });
 
   it('singleHot: テーブルに余裕があっても単一キーは 1,000 WCU で頭打ちになる', () => {
     const { summary } = runScenario(singleHotKey);
     // テーブル設定は uniformHealthy とまったく同じ。違うのはキーの分布だけ。
-    expect(summary.partitionCount).toBe(40);
+    expect(summary.partitionCount).toBe(41);
     expect(summary.write.throttleRate).toBeGreaterThan(0.5);
 
     const hottest = summary.write.hottest!;
     expect(hottest.trafficShare).toBeGreaterThan(0.85);
-    // アダプティブキャパシティは ON。それでも救えない。
-    expect(singleHotKey.table.adaptiveCapacity).toBe(true);
     expect(hottest.throttleRate).toBeGreaterThan(0.9);
+  });
+
+  it('singleHot: アダプティブを ON にしても結果はほとんど変わらない', () => {
+    // 「ON にしても救えない」という主張は、ON/OFF を実際に比べないと検証したことにならない。
+    const on = runScenario(singleHotKey).summary.write;
+    const off = runScenario(singleHotKeyWithoutAdaptive).summary.write;
+
+    expect(singleHotKey.table.capacity).toMatchObject({ adaptiveCapacity: true });
+    expect(singleHotKeyWithoutAdaptive.table.capacity).toMatchObject({ adaptiveCapacity: false });
+    // zipf ではフラグ 1 つで 42% → 0% になる。単一ホットキーでは何も起きない。
+    expect(on.throttleRate).toBeCloseTo(off.throttleRate, 3);
+    expect(on.hottest!.throttleRate).toBeCloseTo(off.hottest!.throttleRate, 3);
   });
 
   it('singleHot: ホットパーティションが通せた量は 1,000 WCU 相当を超えない', () => {
@@ -52,12 +75,20 @@ describe('教材シナリオが主張どおりに振る舞う', () => {
 
   it('zipf: 2 つのシナリオは adaptiveCapacity 以外まったく同じ設定である', () => {
     // 「フラグ 1 つの差」であることが対比の前提。ここが崩れたら教材として嘘になる。
-    const { adaptiveCapacity: offFlag, ...offRest } = zipfWithoutAdaptive.table;
-    const { adaptiveCapacity: onFlag, ...onRest } = zipfWithAdaptive.table;
-    expect(offFlag).toBe(false);
-    expect(onFlag).toBe(true);
-    expect(offRest).toEqual(onRest);
+    const strip = (scenario: typeof zipfWithoutAdaptive) => {
+      const { capacity, ...rest } = scenario.table;
+      const { adaptiveCapacity, ...capacityRest } =
+        capacity as Extract<typeof capacity, { mode: 'provisioned' }>;
+      return { adaptiveCapacity, table: { ...rest, capacity: capacityRest } };
+    };
+    const off = strip(zipfWithoutAdaptive);
+    const on = strip(zipfWithAdaptive);
+
+    expect(off.adaptiveCapacity).toBe(false);
+    expect(on.adaptiveCapacity).toBe(true);
+    expect(off.table).toEqual(on.table);
     expect(zipfWithoutAdaptive.durationSeconds).toBe(zipfWithAdaptive.durationSeconds);
+    expect(zipfWithoutAdaptive.load(0)).toEqual(zipfWithAdaptive.load(0));
   });
 
   it('bigItemTrap: 20KB の項目では秒 600 リクエスト付近から弾かれ始める', () => {

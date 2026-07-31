@@ -10,6 +10,14 @@ export interface Scenario {
   readonly durationSeconds: number;
   /** 1 tick の仮想時間 (秒)。既定 0.1 秒。 */
   readonly tickSeconds?: number;
+  /**
+   * 履歴として保持する tick の最大数。既定 2,000。
+   *
+   * 全 tick を保持すると 900 秒 × 0.1 秒 tick × 50 パーティション で 100MB 超のヒープを食う。
+   * M2 でブラウザに載せる前提なので、既定で間引く。
+   * 集計 (`summary`) は間引きに関わらず**全 tick** から計算するので、統計値は正確なまま。
+   */
+  readonly maxRecordedTicks?: number;
 }
 
 /** パーティション 1 本の累計。 */
@@ -53,11 +61,15 @@ export interface ScenarioSummary {
 
 export interface ScenarioResult {
   readonly scenario: Scenario;
+  /** 間引かれた tick 履歴。`maxRecordedTicks` を超える場合は等間隔にサンプリングされる。 */
   readonly ticks: readonly DynamoDbTickResult[];
+  /** 履歴を何 tick おきに保持したか。1 なら間引きなし。 */
+  readonly tickSamplingInterval: number;
   readonly summary: ScenarioSummary;
 }
 
 export const DEFAULT_TICK_SECONDS = 0.1;
+export const DEFAULT_MAX_RECORDED_TICKS = 2_000;
 
 /**
  * シナリオを最後まで走らせる。
@@ -76,26 +88,36 @@ export function runScenario(scenario: Scenario): ScenarioResult {
     throw new RangeError(`durationSeconds は正の数である必要がある: ${scenario.durationSeconds}`);
   }
 
+  const maxRecordedTicks = scenario.maxRecordedTicks ?? DEFAULT_MAX_RECORDED_TICKS;
+  if (maxRecordedTicks < 1) {
+    throw new RangeError(`maxRecordedTicks は 1 以上である必要がある: ${maxRecordedTicks}`);
+  }
+
   const table = new DynamoDbTable(scenario.table);
   const ticks: DynamoDbTickResult[] = [];
   const tickCount = Math.ceil(scenario.durationSeconds / tickSeconds);
+  const samplingInterval = Math.max(1, Math.ceil(tickCount / maxRecordedTicks));
 
   const readAccumulator = new LaneAccumulator(table.partitionCount, table.readUnitsPerRequest);
   const writeAccumulator = new LaneAccumulator(table.partitionCount, table.writeUnitsPerRequest);
 
   for (let i = 0; i < tickCount; i += 1) {
-    // 需要はその tick の開始時刻で評価する。
-    const demand = scenario.load(i * tickSeconds);
+    // 需要は tick の中点で評価する。開始時刻で評価すると
+    // ramp のような単調増加の負荷を半 tick ぶん系統的に過小評価してしまう。
+    const demand = scenario.load((i + 0.5) * tickSeconds);
     const tick = table.step(demand, tickSeconds);
-    ticks.push(tick);
 
+    // 集計は全 tick から取る。間引くのは履歴だけ。
     readAccumulator.add(tick.read.partitions, tickSeconds);
     writeAccumulator.add(tick.write.partitions, tickSeconds);
+
+    if (i % samplingInterval === 0) ticks.push(tick);
   }
 
   return {
     scenario,
     ticks,
+    tickSamplingInterval: samplingInterval,
     summary: {
       partitionCount: table.partitionCount,
       idealShare: 1 / table.partitionCount,

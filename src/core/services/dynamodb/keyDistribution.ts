@@ -60,6 +60,13 @@ export function singleHotWeights(keyCount: number, hotRatio: number): KeyWeights
     throw new RangeError(`hotRatio は 0..1 の範囲である必要がある: ${hotRatio}`);
   }
   if (keyCount === 1) return [1];
+  // 均等配分より小さい hotRatio を許すと「singleHot なのに先頭が最も冷たい」分布ができてしまい、
+  // 名前と中身が食い違う。ホットキーは少なくとも平均以上の重みを持つ。
+  if (hotRatio < 1 / keyCount) {
+    throw new RangeError(
+      `hotRatio は均等配分 (${1 / keyCount}) 以上である必要がある: ${hotRatio}`,
+    );
+  }
 
   const rest = (1 - hotRatio) / (keyCount - 1);
   const weights = new Array<number>(keyCount).fill(rest);

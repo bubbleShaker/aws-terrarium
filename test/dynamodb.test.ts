@@ -12,12 +12,16 @@ import {
   writeUnitsPerRequest,
 } from '../src/core/services/dynamodb/limits.js';
 import {
-  allocateCapacity,
   assignKeysToPartitions,
   estimatePartitionCount,
   foldKeyWeightsToPartitions,
 } from '../src/core/services/dynamodb/partitioning.js';
-import { DynamoDbTable } from '../src/core/services/dynamodb/table.js';
+import {
+  AdaptiveAllocator,
+  EvenSplitAllocator,
+  evenShareRatePerSec,
+} from '../src/core/services/dynamodb/allocator.js';
+import { DynamoDbTable, type DynamoDbTableConfig } from '../src/core/services/dynamodb/table.js';
 
 const sum = (values: readonly number[]): number => values.reduce((a, b) => a + b, 0);
 
@@ -112,7 +116,15 @@ describe('estimatePartitionCount', () => {
     ).toBe(50);
   });
 
-  it('3 つの制約のうち最大のものが採用される', () => {
+  it('読み取りと書き込みは「和」で効く（1 パーティションが両方を分け合うため）', () => {
+    // 12,000 RCU = 4 パーティション相当、40,000 WCU = 40 パーティション相当。
+    // max なら 40 だが、実際には両方を同時に賄う必要があるので 44。
+    expect(
+      estimatePartitionCount({ readUnitsPerSec: 12_000, writeUnitsPerSec: 40_000, tableSizeGb: 1 }),
+    ).toBe(44);
+  });
+
+  it('スループット由来とストレージ由来では大きい方が採用される', () => {
     expect(
       estimatePartitionCount({ readUnitsPerSec: 12_000, writeUnitsPerSec: 40_000, tableSizeGb: 500 }),
     ).toBe(50);
@@ -152,78 +164,86 @@ describe('partitioning', () => {
   });
 });
 
-describe('allocateCapacity', () => {
-  it('アダプティブ OFF なら需要に関係なく頭割り', () => {
-    const allocation = allocateCapacity({
-      demandPerPartition: [900, 100, 0, 0],
-      tableCapacityPerSec: 4_000,
-      perPartitionMaxPerSec: PARTITION_MAX_WRITE_UNITS_PER_SEC,
-      adaptive: false,
-    });
-    expect(allocation).toEqual([1_000, 1_000, 1_000, 1_000]);
+describe('CapacityAllocator', () => {
+  const context = {
+    partitionCount: 4,
+    tableCapacityPerSec: 4_000,
+    perPartitionMaxPerSec: PARTITION_MAX_WRITE_UNITS_PER_SEC,
+  };
+
+  it('evenShareRatePerSec は頭割りの取り分を返し、パーティション上限を超えない', () => {
+    expect(evenShareRatePerSec(context)).toBe(1_000);
+    expect(
+      evenShareRatePerSec({ ...context, tableCapacityPerSec: 100_000 }),
+    ).toBe(PARTITION_MAX_WRITE_UNITS_PER_SEC);
+    expect(evenShareRatePerSec({ ...context, tableCapacityPerSec: 400 })).toBe(100);
   });
 
-  it('頭割りの取り分がパーティション上限を超えることはない', () => {
-    const allocation = allocateCapacity({
-      demandPerPartition: [0, 0],
-      tableCapacityPerSec: 100_000,
-      perPartitionMaxPerSec: PARTITION_MAX_WRITE_UNITS_PER_SEC,
-      adaptive: false,
-    });
-    expect(allocation).toEqual([1_000, 1_000]);
+  it('EvenSplit は需要に関係なく頭割り', () => {
+    const allocator = new EvenSplitAllocator(context);
+    expect(allocator.allocate([900, 100, 0, 0])).toEqual([1_000, 1_000, 1_000, 1_000]);
+    // 需要が変わっても配分は変わらない = 暇なパーティションが枠を握ったまま離さない。
+    expect(allocator.allocate([0, 0, 0, 0])).toEqual([1_000, 1_000, 1_000, 1_000]);
   });
 
-  it('アダプティブ ON なら余っているパーティションの分が需要のある方へ回る', () => {
-    const allocation = allocateCapacity({
-      demandPerPartition: [900, 10, 10, 10],
-      tableCapacityPerSec: 4_000,
-      perPartitionMaxPerSec: PARTITION_MAX_WRITE_UNITS_PER_SEC,
-      adaptive: true,
-    });
+  it('Adaptive は余っているパーティションの分を需要のある方へ回す', () => {
+    const allocation = new AdaptiveAllocator(context).allocate([900, 10, 10, 10]);
     // 頭割りなら 1,000 ずつだが、需要のない 3 本は 10 しか取らないので熱い所が満たされる。
     expect(allocation[0]).toBeCloseTo(900);
     expect(allocation[1]).toBeCloseTo(10);
   });
 
-  it('アダプティブ ON でもパーティション上限は絶対に超えられない', () => {
-    const allocation = allocateCapacity({
-      demandPerPartition: [50_000, 0, 0, 0],
+  it('Adaptive でもパーティション上限は絶対に超えられない', () => {
+    const allocation = new AdaptiveAllocator({
+      ...context,
       tableCapacityPerSec: 40_000,
-      perPartitionMaxPerSec: PARTITION_MAX_WRITE_UNITS_PER_SEC,
-      adaptive: true,
-    });
+    }).allocate([50_000, 0, 0, 0]);
     expect(allocation[0]).toBe(PARTITION_MAX_WRITE_UNITS_PER_SEC);
   });
 
-  it('アダプティブ ON でも配る総量はテーブルのキャパシティを超えない', () => {
-    const allocation = allocateCapacity({
-      demandPerPartition: [900, 900, 900, 900],
+  it('Adaptive でも配る総量はテーブルのキャパシティを超えない', () => {
+    const allocation = new AdaptiveAllocator({
+      ...context,
       tableCapacityPerSec: 1_000,
-      perPartitionMaxPerSec: PARTITION_MAX_WRITE_UNITS_PER_SEC,
-      adaptive: true,
-    });
+    }).allocate([900, 900, 900, 900]);
     expect(sum(allocation)).toBeCloseTo(1_000);
   });
 });
 
 describe('DynamoDbTable', () => {
   const baseConfig = {
-    capacity: { mode: 'provisioned', readCapacityUnits: 1_000, writeCapacityUnits: 40_000 },
+    capacity: {
+      mode: 'provisioned',
+      readCapacityUnits: 1_000,
+      writeCapacityUnits: 40_000,
+      adaptiveCapacity: true,
+    },
     tableSizeGb: 10,
     itemSizeKb: 1,
     consistentRead: true,
-    adaptiveCapacity: true,
-  } as const;
+  } as const satisfies Omit<DynamoDbTableConfig, 'keyWeights'>;
 
-  it('40,000 WCU なら 40 パーティションになる', () => {
+  it('1,000 RCU + 40,000 WCU なら 41 パーティションになる（読み書きの和）', () => {
     const table = new DynamoDbTable({ ...baseConfig, keyWeights: uniformWeights(500) });
-    expect(table.partitionCount).toBe(40);
+    expect(table.partitionCount).toBe(41);
   });
 
-  it('キーが均等ならスロットルは起きない', () => {
+  it('キーが均等で、余裕を持って使えばスロットルは起きない', () => {
     const table = new DynamoDbTable({ ...baseConfig, keyWeights: uniformWeights(500) });
-    const result = table.step({ readsPerSecond: 0, writesPerSecond: 30_000 }, 1);
+    const result = table.step({ readsPerSecond: 0, writesPerSecond: 24_000 }, 1);
     expect(result.write.throttleRate).toBeLessThan(0.001);
+  });
+
+  it('キーが均等でも、プロビジョニング値に近づくと最も重いパーティションが物理上限に当たる', () => {
+    // 500 キーを 41 パーティションへハッシュで配ると、最大 18 キーを抱える本が出る。
+    // 均等に「設計」しても、実際の負荷は均等に「ならない」。
+    const table = new DynamoDbTable({ ...baseConfig, keyWeights: uniformWeights(500) });
+    const result = table.step({ readsPerSecond: 0, writesPerSecond: 40_000 }, 1);
+    expect(result.write.throttleRate).toBeGreaterThan(0.01);
+
+    const hottest = hottestPartition(result);
+    expect(hottest.demandedUnitsPerSec).toBeGreaterThan(PARTITION_MAX_WRITE_UNITS_PER_SEC);
+    expect(hottest.acceptedUnitsPerSec).toBeLessThanOrEqual(PARTITION_MAX_WRITE_UNITS_PER_SEC + 1e-6);
   });
 
   it('項目サイズが大きいと 1 リクエストあたりの消費ユニットが増える', () => {
@@ -237,30 +257,126 @@ describe('DynamoDbTable', () => {
   });
 
   it('不正な設定は弾く', () => {
-    expect(() => new DynamoDbTable({ ...baseConfig, itemSizeKb: 0, keyWeights: uniformWeights(1) }))
-      .toThrow(RangeError);
-    expect(() => new DynamoDbTable({ ...baseConfig, keyWeights: [] })).toThrow(RangeError);
+    const cases: Partial<DynamoDbTableConfig>[] = [
+      { itemSizeKb: 0 },
+      { itemSizeKb: Number.NaN },
+      { keyWeights: [] },
+      { tableSizeGb: -1 },
+      { tableSizeGb: Number.NaN },
+      { initialBurstTokens: -1 },
+      { capacity: { mode: 'provisioned', readCapacityUnits: -1_000, writeCapacityUnits: 100, adaptiveCapacity: true } },
+      { capacity: { mode: 'on-demand', peakReadUnitsPerSec: 100, peakWriteUnitsPerSec: Number.NaN } },
+    ];
+    for (const override of cases) {
+      expect(
+        () => new DynamoDbTable({ ...baseConfig, keyWeights: uniformWeights(500), ...override }),
+        JSON.stringify(override),
+      ).toThrow(RangeError);
+    }
+  });
+
+  it('on-demand ではアダプティブキャパシティが常に有効になる', () => {
+    const table = new DynamoDbTable({
+      ...baseConfig,
+      capacity: { mode: 'on-demand', peakReadUnitsPerSec: 1_000, peakWriteUnitsPerSec: 40_000 },
+      keyWeights: uniformWeights(500),
+    });
+    expect(table.adaptiveCapacity).toBe(true);
   });
 
   it('on-demand でもパーティションの物理上限は provisioned とまったく同じ', () => {
     const table = new DynamoDbTable({
+      ...baseConfig,
       capacity: { mode: 'on-demand', peakReadUnitsPerSec: 1_000, peakWriteUnitsPerSec: 40_000 },
-      tableSizeGb: 10,
-      itemSizeKb: 1,
-      consistentRead: true,
-      adaptiveCapacity: true,
       keyWeights: singleHotWeights(500, 0.9),
+      initialBurstTokens: 0,
     });
-    // バーストを使い切るまで回してから判定する。
-    let last = table.step({ readsPerSecond: 0, writesPerSecond: 30_000 }, 1);
-    for (let i = 0; i < 600; i += 1) {
-      last = table.step({ readsPerSecond: 0, writesPerSecond: 30_000 }, 1);
-    }
-    const hottest = [...last.write.partitions].sort(
-      (a, b) => b.demandedUnitsPerSec - a.demandedUnitsPerSec,
-    )[0]!;
+    const last = advance(table, 30_000, 60);
+    const hottest = hottestPartition(last);
     // on-demand にしても 1,000 WCU の壁は消えない。
     expect(hottest.acceptedUnitsPerSec).toBeLessThanOrEqual(PARTITION_MAX_WRITE_UNITS_PER_SEC + 1e-6);
     expect(hottest.throttledUnitsPerSec).toBeGreaterThan(0);
   });
+
+  /**
+   * 回帰テスト。
+   *
+   * かつて、アダプティブ ON のときバーストの貯金が二度と回復しないバグがあった。
+   * 原因は貯金の補充量を「アダプティブの配分 − 使用量」で計算していたこと。
+   * アダプティブの配分は必ず需要以下になるため、この差は恒久的に 0 になっていた。
+   * 貯金は「頭割りの取り分 (払っている分) − 使用量」から貯まるのが正しい。
+   */
+  it.each([true, false])(
+    'アダプティブ %s: バーストを使い切っても、暇になれば貯金は回復する',
+    (adaptiveCapacity) => {
+      const config = {
+        ...baseConfig,
+        capacity: { ...baseConfig.capacity, adaptiveCapacity },
+        keyWeights: uniformWeights(500),
+        initialBurstTokens: 0,
+      } satisfies DynamoDbTableConfig;
+      const table = new DynamoDbTable(config);
+
+      // まず飽和させて貯金を空にする。
+      const saturated = advance(table, 200_000, 300);
+      const afterSaturation = totalBurstTokens(saturated);
+
+      // 次に完全に暇にする。
+      const idle = advance(table, 0, 600);
+      const afterIdle = totalBurstTokens(idle);
+
+      expect(afterSaturation).toBeLessThan(1);
+      expect(afterIdle).toBeGreaterThan(afterSaturation);
+      // 300 秒以上暇にしたので満タンまで戻っているはず。
+      const baseline = 40_000 / table.partitionCount;
+      expect(afterIdle).toBeCloseTo(baseline * 300 * table.partitionCount, 0);
+    },
+  );
+
+  it('バーストの貯金があるとスパイクを吸収できるが、貯金ゼロだと即スロットルする', () => {
+    // 頭割りの取り分 (200) を超えるが、物理上限 (1,000) には届かない需要を作る。
+    // 物理上限に当たってしまうと貯金では救えず、この対比が成立しない。
+    const build = (initialBurstTokens: number): DynamoDbTable =>
+      new DynamoDbTable({
+        capacity: {
+          mode: 'provisioned',
+          readCapacityUnits: 0,
+          writeCapacityUnits: 10_000,
+          adaptiveCapacity: false,
+        },
+        tableSizeGb: 500, // → 50 パーティション、頭割りの取り分は 200 WCU
+        itemSizeKb: 1,
+        consistentRead: true,
+        keyWeights: uniformWeights(500),
+        initialBurstTokens,
+      });
+
+    const withBurst = build(1_000_000).step({ readsPerSecond: 0, writesPerSecond: 15_000 }, 1);
+    const withoutBurst = build(0).step({ readsPerSecond: 0, writesPerSecond: 15_000 }, 1);
+
+    expect(withBurst.write.throttleRate).toBeLessThan(0.001);
+    expect(withoutBurst.write.throttleRate).toBeGreaterThan(0.3);
+  });
 });
+
+/** `seconds` 秒ぶん 1 秒 tick で進めて、最後の結果を返す。 */
+function advance(table: DynamoDbTable, writesPerSecond: number, seconds: number) {
+  let last = table.step({ readsPerSecond: 0, writesPerSecond }, 1);
+  for (let i = 1; i < seconds; i += 1) {
+    last = table.step({ readsPerSecond: 0, writesPerSecond }, 1);
+  }
+  return last;
+}
+
+function hottestPartition(tick: { write: { partitions: readonly { demandedUnitsPerSec: number }[] } }) {
+  return [...tick.write.partitions].sort(
+    (a, b) => b.demandedUnitsPerSec - a.demandedUnitsPerSec,
+  )[0]! as (typeof tick)['write']['partitions'][number] & {
+    acceptedUnitsPerSec: number;
+    throttledUnitsPerSec: number;
+  };
+}
+
+function totalBurstTokens(tick: { write: { partitions: readonly { burstTokens: number }[] } }): number {
+  return tick.write.partitions.reduce((total, p) => total + p.burstTokens, 0);
+}
