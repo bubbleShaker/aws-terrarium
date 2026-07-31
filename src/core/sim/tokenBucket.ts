@@ -4,12 +4,16 @@
  * DynamoDB は使わなかったキャパシティを最大 300 秒ぶん貯めておき、
  * 瞬間的なスパイクに使わせてくれる。この「貯金」の挙動がトークンバケットそのもの。
  *
- * 容量は可変にしてある。アダプティブキャパシティが働くと
- * パーティションごとの割り当てレートが毎 tick 変わり、それに応じて貯金の上限も動くため。
+ * ⚠️ 上限は**構築時に固定**する。意図的にそうしている。
+ * 貯金の枠も貯まる速度も「頭割りの取り分 = 払っている分」から決まるのであって、
+ * アダプティブキャパシティで一時的に配分が増えても貯金が増えるわけではない。
+ * ここを可変にしてアダプティブの配分に追従させると、
+ * 「一度バーストを使い切ると二度と回復しない」というバグを再導入することになる
+ * （詳細は research/260801-dynamodb-vs-aurora-capacity.md の 1-6 節）。
  */
 export class TokenBucket {
   #tokens: number;
-  #capacity: number;
+  readonly #capacity: number;
 
   constructor(capacity: number, initialTokens = capacity) {
     this.#capacity = Math.max(0, capacity);
@@ -22,12 +26,6 @@ export class TokenBucket {
 
   get capacity(): number {
     return this.#capacity;
-  }
-
-  /** 上限を変える。上限が下がった場合は貯金も切り詰める。 */
-  setCapacity(capacity: number): void {
-    this.#capacity = Math.max(0, capacity);
-    this.#tokens = Math.min(this.#tokens, this.#capacity);
   }
 
   /** トークンを補充する。上限を超えた分は捨てられる（使わなかったキャパシティは無限には貯まらない）。 */

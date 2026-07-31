@@ -71,10 +71,9 @@ describe('TokenBucket', () => {
     expect(bucket.tokens).toBe(60);
   });
 
-  it('上限を下げると貯金も切り詰められる', () => {
-    const bucket = new TokenBucket(100, 100);
-    bucket.setCapacity(40);
-    expect(bucket.tokens).toBe(40);
+  it('初期値は上限で切り詰められる', () => {
+    expect(new TokenBucket(100, 500).tokens).toBe(100);
+    expect(new TokenBucket(100, -5).tokens).toBe(0);
   });
 
   it('負や 0 の要求では何も起きない', () => {

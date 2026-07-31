@@ -8,13 +8,14 @@ import type { Scenario } from './runScenario.js';
  */
 
 /** `uniformHealthy` と `singleHotKey` で共有する土台。違いをキー分布だけに絞るため。 */
+const sharedCapacity = {
+  mode: 'provisioned',
+  readCapacityUnits: 1_000,
+  writeCapacityUnits: 40_000,
+} as const;
+
 const sharedTable = {
-  capacity: {
-    mode: 'provisioned',
-    readCapacityUnits: 1_000,
-    writeCapacityUnits: 40_000,
-    adaptiveCapacity: true,
-  },
+  capacity: { ...sharedCapacity, adaptiveCapacity: true },
   tableSizeGb: 10,
   itemSizeKb: 1,
   consistentRead: true,
@@ -73,7 +74,7 @@ export const singleHotKeyWithoutAdaptive: Scenario = {
   lesson: 'アダプティブ OFF。single-hot-key と結果がほとんど変わらないことを確かめるための対照。',
   table: {
     ...singleHotKey.table,
-    capacity: { ...sharedTable.capacity, adaptiveCapacity: false as boolean },
+    capacity: { ...sharedCapacity, adaptiveCapacity: false },
   },
 };
 
@@ -131,12 +132,11 @@ export const bigItemTrap: Scenario = {
     '1 パーティション 3,000 read units/秒 でも、20KB の項目なら 1 回の読み取りが 5 units。' +
     'つまり秒 600 リクエストで頭打ちになる。',
   table: {
-    capacity: {
-      mode: 'provisioned',
-      readCapacityUnits: 3_000,
-      writeCapacityUnits: 0,
-      adaptiveCapacity: true,
-    },
+    // provisioned で writeCapacityUnits: 0 は実在しない設定なので on-demand を使う。
+    // provisioned で WCU を実在する最小値 1 にすると、読み書きの和でパーティションが 2 本になり
+    // 1 本あたりの取り分が 1,500 に落ちて物理上限 3,000 を下回るため、
+    // 「600 req/s の壁」が観測できなくなる。この preset は 1 パーティション構成が前提。
+    capacity: { mode: 'on-demand', peakReadUnitsPerSec: 3_000, peakWriteUnitsPerSec: 0 },
     tableSizeGb: 1,
     itemSizeKb: 20,
     consistentRead: true,

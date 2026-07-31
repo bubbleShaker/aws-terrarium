@@ -1,5 +1,5 @@
 import type { Demand } from '../../sim/demand.js';
-import { type AllocatorContext, createAllocator } from './allocator.js';
+import { type AllocatorContext, allocatorFactory } from './allocator.js';
 import { CapacityLane, type LaneStepResult, type PartitionLaneResult } from './capacityLane.js';
 import type { KeyWeights } from './keyDistribution.js';
 import {
@@ -77,10 +77,23 @@ export interface DynamoDbTickResult {
  * > **1,000 WCU で頭打ち**になる。アダプティブキャパシティは偏りを救ってくれるが、
  * > 単一キーは分割できないので救いきれない。
  *
- * ⚠️ モデル上の単純化: バーストの貯金はパーティション単位でしか制限していないため、
- * 全パーティションが同時に貯金を放出すると、瞬間的にはテーブルの
- * プロビジョニング値を超える量が通る。実機の会計もパーティション単位なので
- * 方向としては正しいが、テーブル単位の瞬間上限は本モデルには無い。
+ * ## バーストとプロビジョニング値の関係（誤解しやすい点）
+ *
+ * 貯金を放出している間は、**テーブル全体の受理量がプロビジョニング値を数分間超える**。
+ * 実測では 2,000 WCU のテーブルが 1.55 倍の 3,100 WCU を 400 秒間出す。
+ * これはバグではなく、バーストキャパシティの定義そのもの
+ * （暇な間に貯めた分を後で使っている）。
+ *
+ * 保証しているのは瞬間値ではなく**保存則**である:
+ *
+ * > 貯金ゼロから始めた場合、累計の受理量は
+ * > 「テーブルのキャパシティ × 経過時間」を決して超えない。
+ *
+ * 無から容量を生み出していないことがモデルの健全性の根幹であり、
+ * `test/capacityLane.test.ts` で全パターンについて検証している。
+ *
+ * ⚠️ モデル上の単純化: テーブル単位の**瞬間**上限は設けていない
+ * （実機の会計もパーティション単位なので方向としては正しい）。
  */
 export class DynamoDbTable {
   readonly #partitionCount: number;
@@ -180,7 +193,7 @@ export class DynamoDbTable {
   ): CapacityLane {
     return new CapacityLane({
       ...context,
-      allocator: createAllocator(context, adaptive),
+      allocatorFactory: allocatorFactory(adaptive),
       initialBurstTokens,
     });
   }

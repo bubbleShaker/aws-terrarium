@@ -1,5 +1,10 @@
 import { TokenBucket } from '../../sim/tokenBucket.js';
-import { type AllocatorContext, type CapacityAllocator, evenShareRatePerSec } from './allocator.js';
+import {
+  type AllocatorContext,
+  type CapacityAllocator,
+  type CapacityAllocatorFactory,
+  evenShareRatePerSec,
+} from './allocator.js';
 import { BURST_WINDOW_SECONDS } from './limits.js';
 
 /**
@@ -43,7 +48,12 @@ export interface LaneStepResult {
 }
 
 export interface CapacityLaneConfig extends AllocatorContext {
-  readonly allocator: CapacityAllocator;
+  /**
+   * 配分戦略の生成関数。組み立て済みの allocator ではなく生成関数を受け取るのは、
+   * **別の context から作った allocator を渡せてしまう**のを構造的に防ぐため。
+   * それを許すと、頭割りの取り分と実際の配分が食い違った状態を作れてしまう。
+   */
+  readonly allocatorFactory: CapacityAllocatorFactory;
   /**
    * バーストの初期貯金 (units)。既定は満タン。
    *
@@ -55,6 +65,7 @@ export interface CapacityLaneConfig extends AllocatorContext {
 
 export class CapacityLane {
   readonly #config: CapacityLaneConfig;
+  readonly #allocator: CapacityAllocator;
   readonly #buckets: readonly TokenBucket[];
   /** 頭割りしたときの 1 パーティションあたりの取り分 (units/秒)。 */
   readonly #baselineRatePerSec: number;
@@ -64,6 +75,8 @@ export class CapacityLane {
       throw new RangeError(`partitionCount は 1 以上である必要がある: ${config.partitionCount}`);
     }
     this.#config = config;
+    // 自分の context から作るので、配分と頭割りの取り分が必ず同じ前提を共有する。
+    this.#allocator = config.allocatorFactory(config);
     this.#baselineRatePerSec = evenShareRatePerSec(config);
 
     // 貯金の枠も貯まる速度も「払っている分」= 頭割りの取り分から決まる。
@@ -88,60 +101,79 @@ export class CapacityLane {
       throw new RangeError(`dtSeconds は正の数である必要がある: ${dtSeconds}`);
     }
 
-    const allowance = this.#config.allocator.allocate(demandPerPartition);
+    const allowance = this.#allocator.allocate(demandPerPartition);
     const { perPartitionMaxPerSec, partitionCount } = this.#config;
+    const baselineUnits = this.#baselineRatePerSec * dtSeconds;
+    // バーストの貯金を使っても、パーティションの物理上限は絶対に超えられない。
+    // 「バーストがあるから 1,000 WCU の壁を越えられる」わけではない、という肝。
+    const hardCapUnits = perPartitionMaxPerSec * dtSeconds;
 
+    // ── 第 1 段: 各パーティションが持続レートの範囲で通す量を確定する ──
+    const plans = Array.from({ length: partitionCount }, (_, i) => {
+      const demandRate = Math.max(0, demandPerPartition[i] ?? 0);
+      const allowanceRate = Math.max(0, allowance[i] ?? 0);
+      const demandUnits = demandRate * dtSeconds;
+      const allowedUnits = Math.min(demandUnits, hardCapUnits);
+      const sustainedUnits = allowanceRate * dtSeconds;
+      return {
+        demandRate,
+        allowanceRate,
+        demandUnits,
+        allowedUnits,
+        capacityUsed: Math.min(allowedUnits, sustainedUnits),
+      };
+    });
+
+    // ── 第 2 段: 貯金に回せる量を、テーブル全体で保存則が成り立つように按分する ──
+    //
+    // 「払っている分 (頭割り) を使い切らなかった差額」が貯金になるのが基本。
+    // ただしアダプティブでは、その差額の一部が**他のパーティションへ再配分されて既に使われている**。
+    // 単純に差額をそのまま貯金にすると、同じ未使用容量を「再配分」と「貯金」で二重に使うことになり、
+    // テーブルのプロビジョニング値を大きく超える量を長時間出せてしまう。
+    // そこで、譲った側からは譲った分を差し引く。
+    let totalSurplus = 0;
+    let totalDonated = 0;
+    for (const plan of plans) {
+      totalSurplus += Math.max(0, baselineUnits - plan.capacityUsed);
+      totalDonated += Math.max(0, plan.capacityUsed - baselineUnits);
+    }
+    // 余剰のうち、他所へ渡らずに手元に残る割合。
+    const retainedRatio = totalSurplus > 0 ? Math.max(0, 1 - totalDonated / totalSurplus) : 0;
+
+    // ── 第 3 段: 貯金を補充し、足りない分を貯金から持ち出す ──
     const partitions: PartitionLaneResult[] = [];
     let totalDemanded = 0;
     let totalAccepted = 0;
 
     for (let i = 0; i < partitionCount; i += 1) {
       const bucket = this.#buckets[i];
-      if (bucket === undefined) {
+      const plan = plans[i];
+      if (bucket === undefined || plan === undefined) {
         // 構築時に partitionCount 本作っているので到達しない。
         // 黙って continue すると集計から静かに消えて合計値が壊れるため、明示的に落とす。
         throw new Error(`パーティション ${i} のバケットが存在しない`);
       }
 
-      const demandRate = Math.max(0, demandPerPartition[i] ?? 0);
-      const allowanceRate = Math.max(0, allowance[i] ?? 0);
+      const surplus = Math.max(0, baselineUnits - plan.capacityUsed);
+      bucket.refill(surplus * retainedRatio);
 
-      const demandUnits = demandRate * dtSeconds;
-      // バーストの貯金を使っても、パーティションの物理上限は絶対に超えられない。
-      // 「バーストがあるから 1,000 WCU の壁を越えられる」わけではない、という肝。
-      const hardCapUnits = perPartitionMaxPerSec * dtSeconds;
-      const allowedUnits = Math.min(demandUnits, hardCapUnits);
+      const fromBurst = bucket.consume(plan.allowedUnits - plan.capacityUsed);
+      const acceptedUnits = plan.capacityUsed + fromBurst;
+      const throttledUnits = plan.demandUnits - acceptedUnits;
 
-      // 1. まず配分された持続レートの範囲で通す。
-      const sustainedUnits = allowanceRate * dtSeconds;
-      const capacityUsed = Math.min(allowedUnits, sustainedUnits);
-
-      // 2. 「払っている分」を使い切らなかった差額が貯金になる。
-      //    アダプティブで配分が増えていても、貯金の基準は頭割りのまま。
-      //    ここを配分基準にすると、アダプティブ時は allowance <= demand が常に成り立つため
-      //    差額が恒久的に 0 になり、貯金が二度と回復しなくなる。
-      const baselineUnits = this.#baselineRatePerSec * dtSeconds;
-      bucket.refill(Math.max(0, baselineUnits - capacityUsed));
-
-      // 3. 足りない分を貯金から持ち出す。
-      const fromBurst = bucket.consume(allowedUnits - capacityUsed);
-
-      const acceptedUnits = capacityUsed + fromBurst;
-      const throttledUnits = demandUnits - acceptedUnits;
-
-      totalDemanded += demandUnits;
+      totalDemanded += plan.demandUnits;
       totalAccepted += acceptedUnits;
 
       partitions.push({
         index: i,
-        demandedUnitsPerSec: demandRate,
+        demandedUnitsPerSec: plan.demandRate,
         acceptedUnitsPerSec: acceptedUnits / dtSeconds,
         throttledUnitsPerSec: throttledUnits / dtSeconds,
-        allowanceUnitsPerSec: allowanceRate,
+        allowanceUnitsPerSec: plan.allowanceRate,
         burstTokens: bucket.tokens,
         burstDrawUnitsPerSec: fromBurst / dtSeconds,
-        utilizationVsBaseline: ratio(demandRate, this.#baselineRatePerSec),
-        utilizationVsHardCap: ratio(demandRate, perPartitionMaxPerSec),
+        utilizationVsBaseline: ratio(plan.demandRate, this.#baselineRatePerSec),
+        utilizationVsHardCap: ratio(plan.demandRate, perPartitionMaxPerSec),
       });
     }
 

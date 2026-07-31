@@ -92,7 +92,12 @@ describe('教材シナリオが主張どおりに振る舞う', () => {
   });
 
   it('bigItemTrap: 20KB の項目では秒 600 リクエスト付近から弾かれ始める', () => {
-    const result = runScenario(bigItemTrap);
+    // このシナリオは 1 パーティション構成が前提。パーティションが 2 本になると
+    // 1 本あたりの取り分が物理上限を下回り、バーストが壁を隠して観測できなくなる。
+    const result = runScenario({ ...bigItemTrap, maxRecordedTicks: Number.MAX_SAFE_INTEGER });
+    expect(result.summary.partitionCount).toBe(1);
+    expect(result.tickSamplingInterval).toBe(1);
+
     const throttlingTick = result.ticks.find((tick) => tick.read.throttleRate > 0.001);
     expect(throttlingTick).toBeDefined();
     // 需要が 600 req/s を超えたあたりで初めてスロットルが始まる。

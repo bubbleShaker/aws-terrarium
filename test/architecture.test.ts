@@ -13,11 +13,22 @@ import { describe, expect, it } from 'vitest';
 const CORE_DIR = fileURLToPath(new URL('../src/core', import.meta.url));
 
 const FORBIDDEN_IN_CORE = [
+  // View 層のライブラリ
   'three',
   'react',
   'react-dom',
   '@react-three/fiber',
   '@react-three/drei',
+  // I/O。Core は純粋な計算だけを担う
+  'node:fs',
+  'node:fs/promises',
+  'node:child_process',
+  'node:http',
+  'node:https',
+  'node:net',
+  'node:process',
+  'fs',
+  'child_process',
 ];
 
 async function collectTsFiles(dir: string): Promise<string[]> {

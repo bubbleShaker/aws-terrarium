@@ -18,6 +18,8 @@ import {
 } from '../src/core/services/dynamodb/partitioning.js';
 import {
   AdaptiveAllocator,
+  type AllocatorContext,
+  type CapacityAllocator,
   EvenSplitAllocator,
   evenShareRatePerSec,
 } from '../src/core/services/dynamodb/allocator.js';
@@ -210,6 +212,55 @@ describe('CapacityAllocator', () => {
   });
 });
 
+/**
+ * 契約テスト。`CapacityAllocator` は差し替え可能な拡張点なので、
+ * どの実装でも守られるべき不変条件を全実装に対して回す。
+ * 3 が破れるとテーブルのプロビジョニング値を超える量が通り、
+ * 2 が破れるとパーティションの物理上限という本モデルの根幹が崩れる。
+ */
+describe.each([
+  ['EvenSplitAllocator', (c: AllocatorContext) => new EvenSplitAllocator(c)],
+  ['AdaptiveAllocator', (c: AllocatorContext) => new AdaptiveAllocator(c)],
+] as const)('CapacityAllocator の契約: %s', (_name, create) => {
+  const contexts: AllocatorContext[] = [
+    { partitionCount: 4, tableCapacityPerSec: 4_000, perPartitionMaxPerSec: 1_000 },
+    { partitionCount: 1, tableCapacityPerSec: 3_000, perPartitionMaxPerSec: 3_000 },
+    { partitionCount: 50, tableCapacityPerSec: 20_000, perPartitionMaxPerSec: 1_000 },
+    // テーブルのキャパシティがパーティション総容量を大きく上回る歪んだ設定。
+    { partitionCount: 2, tableCapacityPerSec: 100_000, perPartitionMaxPerSec: 1_000 },
+  ];
+
+  const demands = (n: number): readonly number[][] => [
+    new Array<number>(n).fill(0),
+    new Array<number>(n).fill(500),
+    new Array<number>(n).fill(1_000_000),
+    Array.from({ length: n }, (_, i) => (i === 0 ? 1_000_000 : 0)),
+    Array.from({ length: n }, (_, i) => i * 137),
+    // 契約は入力配列の長さに依存しない。短すぎる入力でも壊れないこと。
+    [],
+  ];
+
+  it.each(contexts)('不変条件を満たす: %o', (context) => {
+    const allocator: CapacityAllocator = create(context);
+    for (const demand of demands(context.partitionCount)) {
+      const allocation = allocator.allocate(demand);
+
+      // 契約 1: 長さは partitionCount と一致する
+      expect(allocation).toHaveLength(context.partitionCount);
+
+      for (const value of allocation) {
+        // 契約 2: 各要素は 0 以上 perPartitionMaxPerSec 以下
+        expect(value).toBeGreaterThanOrEqual(0);
+        expect(value).toBeLessThanOrEqual(context.perPartitionMaxPerSec + 1e-9);
+        expect(Number.isFinite(value)).toBe(true);
+      }
+
+      // 契約 3: 合計は tableCapacityPerSec を超えない
+      expect(sum(allocation)).toBeLessThanOrEqual(context.tableCapacityPerSec + 1e-9);
+    }
+  });
+});
+
 describe('DynamoDbTable', () => {
   const baseConfig = {
     capacity: {
@@ -235,7 +286,8 @@ describe('DynamoDbTable', () => {
   });
 
   it('キーが均等でも、プロビジョニング値に近づくと最も重いパーティションが物理上限に当たる', () => {
-    // 500 キーを 41 パーティションへハッシュで配ると、最大 18 キーを抱える本が出る。
+    // 500 キーを 41 パーティションへハッシュで配ると、最大 17 キーを抱える本が出る
+    // (重み 0.0340 × 500)。理想は 12.2 キー。
     // 均等に「設計」しても、実際の負荷は均等に「ならない」。
     const table = new DynamoDbTable({ ...baseConfig, keyWeights: uniformWeights(500) });
     const result = table.step({ readsPerSecond: 0, writesPerSecond: 40_000 }, 1);

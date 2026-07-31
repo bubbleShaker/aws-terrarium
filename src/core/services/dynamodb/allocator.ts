@@ -9,7 +9,17 @@ import { maxMinFairShare } from './fairShare.js';
  */
 export interface CapacityAllocator {
   readonly name: string;
-  /** 各パーティションが使える持続レート (units/秒) を返す。 */
+  /**
+   * 各パーティションが使える持続レート (units/秒) を返す。
+   *
+   * 実装が必ず守る契約（`test/dynamodb.test.ts` の契約テストで全実装に対して検証している）:
+   *   1. 返り値の長さは `partitionCount` と一致する
+   *   2. 各要素は `0 以上 perPartitionMaxPerSec 以下`
+   *   3. 合計は `tableCapacityPerSec` を超えない
+   *
+   * 3 が破れるとテーブルのプロビジョニング値を超える量が通り、
+   * 2 が破れるとパーティションの物理上限という本モデルの根幹が崩れる。
+   */
   allocate(demandPerPartition: readonly number[]): number[];
 }
 
@@ -75,13 +85,17 @@ export class AdaptiveAllocator implements CapacityAllocator {
   allocate(demandPerPartition: readonly number[]): number[] {
     // 需要を超えて配っても無駄なので、需要とパーティション上限の小さい方で頭を打たせ、
     // 余った分を他へ回す。
-    const ceilings = demandPerPartition.map((demand) =>
-      Math.min(Math.max(demand, 0), this.#context.perPartitionMaxPerSec),
+    // 長さは必ず partitionCount に揃える（契約 1）。渡された配列の長さには依存しない。
+    const ceilings = Array.from({ length: this.#context.partitionCount }, (_, i) =>
+      Math.min(Math.max(demandPerPartition[i] ?? 0, 0), this.#context.perPartitionMaxPerSec),
     );
     return maxMinFairShare(ceilings, this.#context.tableCapacityPerSec);
   }
 }
 
-export function createAllocator(context: AllocatorContext, adaptive: boolean): CapacityAllocator {
-  return adaptive ? new AdaptiveAllocator(context) : new EvenSplitAllocator(context);
+/** 配分戦略の生成関数。`CapacityLane` はこれを受け取り、自分の context から allocator を作る。 */
+export type CapacityAllocatorFactory = (context: AllocatorContext) => CapacityAllocator;
+
+export function allocatorFactory(adaptive: boolean): CapacityAllocatorFactory {
+  return (context) => (adaptive ? new AdaptiveAllocator(context) : new EvenSplitAllocator(context));
 }
