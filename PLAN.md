@@ -131,6 +131,78 @@ M1 に含めないもの: GSI、トランザクション、Streams、3D、Aurora
 
 `test/capacityLane.test.ts` で検証している。無から容量を生み出していないことが健全性の根幹。
 
+## M2 の入口（新しいセッションはここから読む）
+
+M1 を実装した文脈が無くても M2 を始められるように、必要な情報をここに集約する。
+
+### View 層が Core に対して知るべきこと
+
+```ts
+import { DynamoDbTable } from './core/services/dynamodb/table.js';
+import { buildKeyWeights } from './core/services/dynamodb/keyDistribution.js';
+
+const table = new DynamoDbTable({
+  capacity: { mode: 'provisioned', readCapacityUnits: 1_000,
+              writeCapacityUnits: 40_000, adaptiveCapacity: true },
+  tableSizeGb: 10,
+  itemSizeKb: 1,
+  consistentRead: true,
+  keyWeights: buildKeyWeights({ kind: 'singleHot', hotRatio: 0.9 }, 500),
+});
+
+table.partitionCount;     // 描くべき柱の本数
+table.partitionWeights;   // 各柱が受け持つトラフィックの割合 (合計 1)
+
+const tick = table.step({ readsPerSecond: 0, writesPerSecond: 30_000 }, 0.1);
+tick.write.partitions[i]; // ↓ 柱 1 本を描くのに必要な値が全部入っている
+//   demandedUnitsPerSec / acceptedUnitsPerSec / throttledUnitsPerSec
+//   allowanceUnitsPerSec / burstTokens / burstDrawUnitsPerSec
+//   utilizationVsBaseline  … 需要 / 頭割りの取り分
+//   utilizationVsHardCap   … 需要 / 物理上限。1 に達したら打つ手なし ← 赤熱の指標はこれ
+```
+
+`runScenario()` は「シナリオを最後まで一気に流して集計する」バッチ用。
+**M2 のインタラクティブな用途には使わない**（毎フレーム `table.step()` を呼ぶ）。
+
+### M2 で必ず踏む設計判断 3 つ
+
+**1. 描画フレームとシミュレーション tick を分離する**
+
+ブラウザは 60fps（可変）、シミュレーションの tick は 0.1 秒の仮想時間で固定。
+これを直結すると、フレームレートが揺れただけでシミュレーション結果が変わり、
+M1 で苦労して確保した決定論性が壊れる。
+
+固定タイムステップの蓄積方式を使う:
+```
+accumulator += 実フレーム経過秒 × 時間倍率
+while (accumulator >= tickSeconds) { table.step(demand, tickSeconds); accumulator -= tickSeconds }
+// 描画は最後の tick 結果を使う（補間は必要になってから）
+```
+「1 フレームで進める tick 数」に上限を設けること（タブ復帰時のスパイラルを防ぐ）。
+
+**2. 粒子は全リクエストではなくサンプリングする**
+
+30,000 req/s を粒子で描いたら即死する。**統計値は正確なまま、粒子だけ間引く**のが
+M1 から一貫した方針（PLAN.md 冒頭「なぜ tick ベースのハイブリッドか」参照）。
+粒子数は固定上限（数百程度）にし、各柱への配分を `partitionWeights` に比例させる。
+
+**3. 赤熱の指標は `utilizationVsHardCap`**
+
+`utilizationVsBaseline` ではない。物理上限との距離こそが「もう打つ手がない」を意味し、
+M1 で一番伝えたい「単一キーは分割できない」に直結する。
+
+### M2 のゴール（これが見えたら完了）
+
+> ダイヤルで負荷を上げていくと、**1 本の柱だけが赤熱して粒子を弾き始める**。
+> キー分布を `uniform` → `singleHot` に切り替えると、その瞬間に絵が変わる。
+
+### 依存関係（未インストール）
+
+`vite` / `react` / `react-dom` / `three` / `@react-three/fiber` / `@react-three/drei`。
+`photo-orb` (`~/git/photo-orb`) が同じ構成で動いているので、バージョンはそちらを参照するとよい。
+`tsconfig.json` の `lib` から `DOM` を外してあるので、View 用に別 tsconfig を切る必要がある
+（Core が `document` / `window` に触れないようコンパイラでも守るため）。
+
 ## M3 で対比させる核心
 
 エミュレータの価値は「並べて初めて分かる」ことにある。
