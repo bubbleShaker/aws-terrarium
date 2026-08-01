@@ -17,6 +17,7 @@ src/
 │   │   └── particleSampling.ts 重みに比例した整数配分 (最大剰余方式)
 │   └── scenario/
 │       ├── liveSession.ts      インタラクティブ駆動。テーブル再構築の境界を集約
+       │                       ※ M3 で dynamoDbLiveSession.ts へ改名（この文書は M2 時点の記録）
 │       └── livePresets.ts      M1 の 7 シナリオを空間から選べる形に
 └── view/                       ← 新規。Core の状態を読んで描くだけ
     ├── main.tsx / App.tsx      画面全体。React state は「コントロールの鏡」でしかない
