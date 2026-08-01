@@ -1,15 +1,19 @@
 import { useState } from 'react';
 import type { JSX, ReactNode } from 'react';
-import type { LaneKind, DynamoDbLiveSettings } from '../../core/scenario/dynamodb/liveSession.js';
+import type { Demand, LaneKind } from '../../core/sim/demand.js';
+import type { DynamoDbLiveSettings } from '../../core/scenario/dynamodb/liveSession.js';
 import { type DynamoDbLivePreset, dynamoDbLivePresets } from '../../core/scenario/dynamodb/livePresets.js';
 import type { KeyDistributionSpec } from '../../core/services/dynamodb/keyDistribution.js';
 
 interface ControlPanelProps {
   readonly settings: DynamoDbLiveSettings;
+  /** 共有の負荷ダイヤル。テーブル設定とは別物なので prop も分けている。 */
+  readonly load: Demand;
   readonly lane: LaneKind;
   readonly presetName: string;
   readonly timeScale: number;
   readonly onChange: (patch: Partial<DynamoDbLiveSettings>) => void;
+  readonly onLoadChange: (patch: Partial<Demand>) => void;
   readonly onLoadPreset: (preset: DynamoDbLivePreset) => void;
   readonly onLaneChange: (lane: LaneKind) => void;
   readonly onTimeScaleChange: (scale: number) => void;
@@ -118,16 +122,18 @@ function StructuralRange({
  */
 export function ControlPanel({
   settings,
+  load,
   lane,
   presetName,
   timeScale,
   onChange,
+  onLoadChange,
   onLoadPreset,
   onLaneChange,
   onTimeScaleChange,
 }: ControlPanelProps): JSX.Element {
   const isWrite = lane === 'write';
-  const loadValue = isWrite ? settings.writesPerSecond : settings.readsPerSecond;
+  const loadValue = isWrite ? load.writesPerSecond : load.readsPerSecond;
   const provisioned = settings.capacity.mode === 'provisioned';
   const capacityValue = provisioned
     ? isWrite
@@ -191,9 +197,13 @@ export function ControlPanel({
           value={loadValue}
           onChange={(event) => {
             const value = Number(event.target.value);
-            onChange(isWrite ? { writesPerSecond: value } : { readsPerSecond: value });
+            onLoadChange(isWrite ? { writesPerSecond: value } : { readsPerSecond: value });
           }}
         />
+        <p className="note">
+          このダイヤルは 1 本しかない。DynamoDB と Aurora へ同じ量が流れる。
+          片方だけずらす切り替えは意図的に用意していない（実験が公平でなくなるため）。
+        </p>
       </section>
 
       <section className="control">

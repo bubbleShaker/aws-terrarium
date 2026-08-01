@@ -2,14 +2,15 @@ import { useFrame } from '@react-three/fiber';
 import { useMemo, useRef } from 'react';
 import type { JSX } from 'react';
 import type { BufferAttribute, Points } from 'three';
-import type { LaneKind, DynamoDbLiveSession } from '../../core/scenario/dynamodb/liveSession.js';
+import type { LaneKind } from '../../core/sim/demand.js';
+import type { DrivenDynamoDbSession } from '../../core/scenario/driver.js';
 import { allocateByWeight } from '../../core/sim/particleSampling.js';
 import { Rng } from '../../core/sim/rng.js';
 import { partitionThrottleRate } from '../../core/services/dynamodb/partitionMetrics.js';
 import { SOURCE_HEIGHT, columnHeight, gridPositions } from '../layout.js';
 
 interface RequestParticlesProps {
-  readonly session: DynamoDbLiveSession;
+  readonly session: DrivenDynamoDbSession;
   readonly lane: LaneKind;
   /** 描く粒子の総数。**リクエスト数ではない**。 */
   readonly maxParticles?: number;

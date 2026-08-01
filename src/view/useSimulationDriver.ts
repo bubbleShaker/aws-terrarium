@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import type { DynamoDbLiveSession, DynamoDbSessionSnapshot } from '../core/scenario/dynamodb/liveSession.js';
+import type { TerrariumDriver, TerrariumSnapshot } from '../core/scenario/driver.js';
 
 /**
  * シミュレーションを実時間で回し、HUD 用のスナップショットを間引いて配る。
@@ -17,9 +17,14 @@ import type { DynamoDbLiveSession, DynamoDbSessionSnapshot } from '../core/scena
  * 柱 50 本ぶんのオブジェクト生成が毎フレーム発生する。
  * HUD の数字は 10Hz もあれば十分読めるので、そこで止める。
  * 3D は React の再描画を経由せず `session.latest` を直接読むので影響を受けない。
+ *
+ * ## 実時間に触れてよいのはここだけ
+ *
+ * `performance.now()` から先は `TerrariumDriver` の `SimulationClock` が
+ * 固定タイムステップへ均してくれる。Core は実時間を一切知らない。
  */
-export function useSimulationDriver(session: DynamoDbLiveSession, hudHz = 10): DynamoDbSessionSnapshot {
-  const [snapshot, setSnapshot] = useState<DynamoDbSessionSnapshot>(() => session.snapshot());
+export function useSimulationDriver(driver: TerrariumDriver, hudHz = 10): TerrariumSnapshot {
+  const [snapshot, setSnapshot] = useState<TerrariumSnapshot>(() => driver.snapshot());
 
   useEffect(() => {
     let frame = 0;
@@ -31,19 +36,20 @@ export function useSimulationDriver(session: DynamoDbLiveSession, hudHz = 10): D
       const deltaSeconds = (now - last) / 1000;
       last = now;
 
-      session.advance(deltaSeconds);
+      // 1 回の advance で両サービスが同じ tick 数ぶん進む。
+      driver.advance(deltaSeconds);
 
       sinceSnapshot += deltaSeconds;
       if (sinceSnapshot >= interval) {
         sinceSnapshot = 0;
-        setSnapshot(session.snapshot());
+        setSnapshot(driver.snapshot());
       }
       frame = requestAnimationFrame(loop);
     };
 
     frame = requestAnimationFrame(loop);
     return () => cancelAnimationFrame(frame);
-  }, [session, hudHz]);
+  }, [driver, hudHz]);
 
   return snapshot;
 }

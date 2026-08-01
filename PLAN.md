@@ -236,6 +236,9 @@ session.update({ writesPerSecond: 30_000 }); // 設定変更。テーブルの�
 session.clock.timeScale = 20;                // 早送り
 ```
 
+⚠️ **この API は M3 で変わった**（#9）。時計と負荷ダイヤルは `TerrariumDriver` へ移り、
+セッションは `step(demand, tickSeconds)` だけを持つ被駆動体になった。下記「M3 で確定した駆動の形」を見ること。
+
 Aurora を足すときは、**この `DynamoDbLiveSession` 相当を Aurora 用にもう 1 つ作る**のが素直。
 `DynamoDbTable` と `AuroraWriter` は内部モデルが違いすぎるので、
 無理に共通のインターフェースへ押し込めない（そこは M3 で判断する）。
@@ -246,12 +249,14 @@ Aurora を足すときは、**この `DynamoDbLiveSession` 相当を Aurora 用�
   あわせて `LiveSettings` → `DynamoDbLiveSettings`、`SessionSnapshot` → `DynamoDbSessionSnapshot`。
   `PartitionView` / `LaneView` / `LaneKind` はすでに DynamoDB のドメイン概念を指す名前なので据え置いた
 - ✅ **scenario 層を `dynamodb/` 名前空間へ移す** — 完了（#12）。下記「Core の構成」参照
-- **`DynamoDbSessionSnapshot` / `PartitionView` を View 層へ移すか検討する。** これは
-  「画面に出したい数字」で変わる presenter であり、Core の他の部分とは変更理由が違う。
-  Aurora と共用しようとすると必ず歪むので、そのタイミングで判断する。
-  **`LaneKind` の置き場所も一緒に考える** — read/write トグルの型として View の 6 ファイルが
-  import しており、Aurora 側が同じトグルを持つと `dynamodb/liveSession.js` を
-  import する羽目になって依存の向きが不自然になる
+- ✅ **`LaneKind` を `sim/demand.ts` へ移した**（#9）。実体は「`Demand` の 2 本のうちどちらか」で
+  サービス非依存なので、`Demand` の隣が正しい置き場所だった。
+  これで Aurora 側が read/write トグルを共有しても `dynamodb/` を import せずに済む
+- ⏸ **`DynamoDbSessionSnapshot` / `PartitionView` の View 層への移設は見送った**（#9）。
+  `TerrariumDriver` が両サービスの snapshot を**同一時刻で 1 回に束ねて**返す構造にしたため、
+  presenter が Core に居ないと「同じ瞬間の比較」を提供できない
+  （並置の主張はそこが崩れると成立しない）。
+  変更理由が違うという指摘自体は正しいので、3D 並置で画面に出す数字が確定してから再判断する
 
 ### Core の構成（Aurora はここへ足す）
 
@@ -265,9 +270,46 @@ src/core/
 │   ├── dynamodb/         table.ts / partitioning.ts / keyDistribution.ts …
 │   └── aurora/           ← M3 で新設。writer.ts（待ち行列モデル本体）
 └── scenario/
+    ├── driver.ts         ← M3 で新設。両サービスを束ねる TerrariumDriver
     ├── dynamodb/         liveSession.ts / livePresets.ts / presets.ts / runScenario.ts
-    └── aurora/           ← M3 で新設。liveSession.ts / livePresets.ts
+    └── aurora/           ← M3 で新設。liveSession.ts
 ```
+
+`driver.ts` が `scenario/` 直下にあるのは、**両サービスを同時に import する唯一のファイル**だから。
+どちらの名前空間にも属さないので、接頭辞も付けない（`TerrariumDriver` / `TerrariumSnapshot`）。
+
+### M3 で確定した駆動の形（#9・View はここだけを見る）
+
+```ts
+import { TerrariumDriver } from '../core/scenario/driver.js';
+
+const driver = new TerrariumDriver({ load, dynamodb: ddbSettings, aurora: auroraSettings });
+
+driver.advance(frameDeltaSeconds);       // 1 回で両方が同じ tick 数ぶん進む
+driver.setLoad({ writesPerSecond: 500 }); // 共有の負荷ダイヤル。1 本しかない
+driver.timeScale = 20;                    // 早送り。両方に等しく効く
+driver.snapshot();                        // { simulatedSeconds, load, dynamodb, aurora } を同一時刻で
+driver.dynamodb / driver.aurora;          // 個々のセッション（3D が latest を毎フレーム読む用）
+```
+
+セッション側は `step(demand, tickSeconds)` しか持たない。**時計も負荷も持たない。**
+
+| 誰が持つか | もの |
+|---|---|
+| `TerrariumDriver` | `SimulationClock`（1 本）/ 負荷ダイヤル（1 本） |
+| `DynamoDbLiveSession` | テーブルの形、作り直しの判断、DynamoDB 用 presenter |
+| `AuroraLiveSession` | writer の諸元、作り直しの判断、Aurora 用 presenter |
+
+共通インターフェースへは押し込めない（PLAN.md の当初の見立てどおり）。
+**共有するのは時間と負荷だけでよく、それ以外に共通項が無い。**
+
+テストで固定していること（`test/terrariumDriver.test.ts`）:
+
+- フレーム時間が揺れても、`timeScale` を途中で変えても、両者の経過時間が 1 tick もズレない
+- 同じ 500 q/s で**受理 400 / 拒否 100 が両者一致し、Aurora だけ 2,651ms**（M3 の看板）
+- ρ=1.05 では**エラー 0 のままレイテンシだけが秒へ伸びる**区間が存在する
+- 同じ設定・同じフレーム列なら 2 回走らせて完全に同一（決定論性）
+- `'clock' in driver.dynamodb === false`（View から個々の時計に手が届かない構造テスト）
 
 テストは `test/` にフラットに置き、**対象の識別子名に合わせる**
 （`dynamoDbLiveSession.test.ts` / `dynamoDbScenario.test.ts`）。
@@ -405,6 +447,12 @@ M3 の主題は「同じ負荷を流したときの差」なので、ダイヤ�
 → **両方を束ねる driver をひとつ作り、時計の操作はそこだけが持つ**。
 View が個々のセッションの `clock` を直接触らない形にする。
 
+✅ **完了（#9）**。下記「M3 で確定した駆動の形」を参照。
+セッションから時計を**取り上げた**（残したまま driver を被せると、使われない時計が
+`simulatedSeconds` に 0 を返し続ける罠になる）。負荷も同じ理由で
+`DynamoDbLiveSettings` から外し、driver が 1 本だけ持つ形にした
+（設定に残すと、片方だけ違う負荷を流せる経路が残ってしまう）。
+
 **3. Aurora のインスタンスクラスをダイヤルにする。**
 
 | クラス | vCPU | max_connections |
@@ -418,10 +466,17 @@ PLAN.md の対比「水平・自動 vs **垂直・手動**」が、操作とし�
 そして上げていくと**窓口は 2→4→8 としか増えないのに、待合室は 1,000→2,000→3,000 と増える**のが見える。
 §2-4 の「並ぶ場所が捌ける本数の 500 倍広い」が、ダイヤルを回すだけで体感できる。
 
-⚠️ **実装時に決めること**: クラスを変えたとき待ち行列をリセットするか。
+✅ **決定（#9）: クラスを変えたら待ち行列はリセットする。**
 実機の Aurora はインスタンスのスケールに**フェイルオーバー（数十秒の断）を伴う**ので、
-リセットするほうが現実に忠実で、かつ「障害の最中にスケールして逃げ切ることはできない」という
-教材価値がある。一方で「行列が掃けていく様子」は見えなくなる。着手時に判断する。
+溜まった接続が新しいインスタンスへ引き継がれることはない。教材としても
+**「障害の最中にスケールして逃げ切ることはできない」**が伝わる。
+引き換えの「行列が掃けていく様子」は**負荷ダイヤルを下げれば見られる**（そちらは作り直さない）ので失われていない。
+
+⚠️ ただし **再送ポリシーの変更ではリセットしない**（これも #9 で決めた）。
+再送はクライアント側の振る舞いであって、サーバに並んでいる客は消えないため。
+ここでリセットすると、メタステーブル障害からの回復理由が
+「増幅を断ち切ったから」ではなく「リセットしたから」に見えてしまい、
+M3 の看板そのものが壊れる。そのため `AuroraWriter` には再送だけを差し替える setter がある。
 
 ## M3 で対比させる核心
 

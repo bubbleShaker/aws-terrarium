@@ -1,13 +1,14 @@
 import type { JSX } from 'react';
 import { OrbitControls } from '@react-three/drei';
 import { Canvas } from '@react-three/fiber';
-import type { LaneKind, DynamoDbLiveSession } from '../../core/scenario/dynamodb/liveSession.js';
+import type { LaneKind } from '../../core/sim/demand.js';
+import type { DrivenDynamoDbSession } from '../../core/scenario/driver.js';
 import { HEIGHT_AT_HARD_CAP, gridExtent } from '../layout.js';
 import { PartitionColumns } from './PartitionColumns.js';
 import { RequestParticles } from './RequestParticles.js';
 
 interface TerrariumSceneProps {
-  readonly session: DynamoDbLiveSession;
+  readonly session: DrivenDynamoDbSession;
   readonly lane: LaneKind;
   /** テーブルを作り直した回数。柱と粒子を作り直すきっかけにする。 */
   readonly generation: number;

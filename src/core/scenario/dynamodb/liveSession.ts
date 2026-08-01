@@ -10,21 +10,24 @@ import {
   type LaneInfo,
   type LaneTickResult,
 } from '../../services/dynamodb/table.js';
-import { SimulationClock, type SimulationClockConfig } from '../../sim/simulationClock.js';
+import type { Demand, LaneKind } from '../../sim/demand.js';
+import { stableStringify } from '../shapeKey.js';
 
 /**
  * インタラクティブに動かすときのテーブル設定。
  *
  * `runScenario()` の `Scenario` と分けているのは、用途が違うため:
  * - `Scenario` は「最後まで一気に流して集計する」バッチ用。負荷は時間の関数 (`LoadProfile`)
- * - `DynamoDbLiveSettings` は「人間がダイヤルを回す」用。負荷はその瞬間の値であり、時間の関数ではない
+ * - `DynamoDbLiveSettings` は「人間がダイヤルを回す」用
  *
  * 同じ型を無理に共用すると、UI から `LoadProfile` を組み立てる羽目になって歪む。
+ *
+ * ⚠️ **負荷 (rps) はここに無い**。M3 で負荷ダイヤルを 1 本の共有にしたため、
+ * 負荷は `TerrariumDriver` が持ち、`step()` の引数として毎 tick 渡ってくる。
+ * ここに残すと DynamoDB 側と Aurora 側で 2 つの負荷が並立し、
+ * 「同じ負荷を両方へ流している」がコードの構造ではなく運用の約束事に落ちる。
  */
 export interface DynamoDbLiveSettings {
-  /** ダイヤルで動かす負荷。ここだけはテーブルを作り直さずに変えられる。 */
-  readonly readsPerSecond: number;
-  readonly writesPerSecond: number;
   readonly distribution: KeyDistributionSpec;
   readonly keyCount: number;
   readonly capacity: CapacityConfig;
@@ -33,8 +36,6 @@ export interface DynamoDbLiveSettings {
   readonly consistentRead: boolean;
   readonly initialBurstTokens?: number | undefined;
 }
-
-export type LaneKind = 'read' | 'write';
 
 /** 柱 1 本を描くのに必要な値を 1 つにまとめたもの。 */
 export interface PartitionView {
@@ -98,20 +99,33 @@ export interface DynamoDbSessionSnapshot {
  * 作り直すとバーストの貯金も経過時間もリセットされる。これは仕様である
  * （設定を変えた瞬間から新しいテーブルが始まる、という素直な解釈）。
  * `generation` が増えるので、View 側はそれを見てリセットに追随できる。
+ *
+ * ## 時計は持たない（M3 で変えた点）
+ *
+ * 以前はこのクラスが `SimulationClock` を持ち `advance(realDeltaSeconds)` を提供していた。
+ * Aurora を並置すると時計が 2 つになり、`timeScale`（早送り）を片方にだけ掛けた瞬間に
+ * **両者の仮想時間が静かにズレる**。「同じ負荷を同じ時間だけ流す」が崩れると M3 の対比は成立しない。
+ * そこで時計は `TerrariumDriver` に一本化し、ここは
+ * **渡された tick 幅ぶんだけ進む純粋な被駆動体**になった。
  */
 export class DynamoDbLiveSession {
   #settings: DynamoDbLiveSettings;
   #table: DynamoDbTable;
   #shapeKey: string;
-  #clock: SimulationClock;
   #latest: DynamoDbTickResult | undefined;
   #generation = 0;
+  /**
+   * このテーブルが生きている間に刻んだ仮想時間 (秒)。作り直すと 0 に戻る。
+   *
+   * driver 側の `simulatedSeconds`（画面全体の経過時間）とは意味が違う。
+   * こちらは「今のテーブルが何秒動いたか」で、バーストの貯金の減り具合と対応する。
+   */
+  #simulatedSeconds = 0;
 
-  constructor(settings: DynamoDbLiveSettings, clockConfig?: SimulationClockConfig) {
+  constructor(settings: DynamoDbLiveSettings) {
     this.#settings = settings;
     this.#shapeKey = tableShapeKey(settings);
     this.#table = buildTable(settings);
-    this.#clock = new SimulationClock(clockConfig);
   }
 
   get settings(): DynamoDbLiveSettings {
@@ -120,10 +134,6 @@ export class DynamoDbLiveSession {
 
   get table(): DynamoDbTable {
     return this.#table;
-  }
-
-  get clock(): SimulationClock {
-    return this.#clock;
   }
 
   /** 直近の tick 結果。まだ 1 度も進んでいなければ undefined。 */
@@ -159,7 +169,8 @@ export class DynamoDbLiveSession {
   #apply(next: DynamoDbLiveSettings): boolean {
     const nextShapeKey = tableShapeKey(next);
     if (nextShapeKey === this.#shapeKey) {
-      // 形が同じなら負荷だけの変更。テーブルは作り直さない。
+      // 内容が同じなら何もしない。同じ設定を渡し直しただけでリセットされると、
+      // プリセットを押し直すたびに時間が巻き戻る。
       this.#settings = next;
       return false;
     }
@@ -173,26 +184,19 @@ export class DynamoDbLiveSession {
     this.#table = table;
     this.#latest = undefined;
     this.#generation += 1;
-    this.#clock.reset();
+    this.#simulatedSeconds = 0;
     return true;
   }
 
   /**
-   * フレームの経過秒を渡して、溜まった分だけシミュレーションを進める。
-   * tick 幅は常に固定なので、フレームレートが揺れても結果は変わらない。
+   * 1 tick 進める。**呼ぶのは `TerrariumDriver` だけ**。
    *
-   * @returns 実際に刻んだ tick 数
+   * 実時間 (フレームの経過秒) をここへ渡してはいけない。固定タイムステップへの
+   * 変換は駆動側の `SimulationClock` が済ませており、ここに来る `tickSeconds` は常に一定である。
    */
-  advance(realDeltaSeconds: number): number {
-    return this.#clock.advance(realDeltaSeconds, (tickSeconds) => {
-      this.#latest = this.#table.step(
-        {
-          readsPerSecond: this.#settings.readsPerSecond,
-          writesPerSecond: this.#settings.writesPerSecond,
-        },
-        tickSeconds,
-      );
-    });
+  step(demand: Demand, tickSeconds: number): void {
+    this.#latest = this.#table.step(demand, tickSeconds);
+    this.#simulatedSeconds += tickSeconds;
   }
 
   /**
@@ -204,7 +208,7 @@ export class DynamoDbLiveSession {
   snapshot(): DynamoDbSessionSnapshot {
     const { read, write } = this.#table.lanes;
     return {
-      simulatedSeconds: this.#clock.simulatedSeconds,
+      simulatedSeconds: this.#simulatedSeconds,
       partitionCount: this.#table.partitionCount,
       idealShare: 1 / this.#table.partitionCount,
       adaptiveCapacity: this.#table.adaptiveCapacity,
@@ -280,28 +284,10 @@ function buildTable(settings: DynamoDbLiveSettings): DynamoDbTable {
 /**
  * テーブルの「形」を表す文字列。これが変わったら作り直す必要がある。
  *
- * 負荷 (rps) だけを取り除いた残り全部を鍵にしている。
- * 個別に列挙すると、あとで設定項目を足したときに**ここへの追加を忘れて**
- * 「変えたのに反映されない」という気づきにくいバグを生む。
- * 残り全部にしておけば、忘れたときの挙動は「余計に作り直す」（安全側）に倒れる。
+ * M3 で負荷が設定から外れたので、いまや `DynamoDbLiveSettings` の項目はすべて形である
+ * （＝ダイヤルを回してもテーブルは作り直されない、という以前の性質は driver 側が担う）。
+ * 除外する項目が 1 つも無いので設定を丸ごと鍵にできる。方針は `shapeKey.ts` を参照。
  */
 function tableShapeKey(settings: DynamoDbLiveSettings): string {
-  const { readsPerSecond: _reads, writesPerSecond: _writes, ...shape } = settings;
-  return stableStringify(shape);
-}
-
-/**
- * キーの順序に依存しない JSON 文字列化。
- * 素の `JSON.stringify` はプロパティの定義順で結果が変わるため、
- * 同じ内容の設定でもオブジェクトの組み立て方が違うと別物と判定されてしまう。
- */
-function stableStringify(value: unknown): string {
-  // JSON.stringify は NaN も Infinity も "null" にしてしまい、別の設定が同じ鍵になる。
-  if (typeof value === 'number' && !Number.isFinite(value)) return `#${String(value)}`;
-  if (value === null || typeof value !== 'object') return JSON.stringify(value) ?? 'null';
-  if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`;
-  const entries = Object.entries(value as Record<string, unknown>)
-    .filter(([, v]) => v !== undefined)
-    .sort(([a], [b]) => (a < b ? -1 : 1));
-  return `{${entries.map(([k, v]) => `${JSON.stringify(k)}:${stableStringify(v)}`).join(',')}}`;
+  return stableStringify(settings);
 }

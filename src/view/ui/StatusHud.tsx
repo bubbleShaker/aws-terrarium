@@ -1,5 +1,6 @@
 import type { JSX } from 'react';
-import type { LaneKind, DynamoDbSessionSnapshot } from '../../core/scenario/dynamodb/liveSession.js';
+import type { LaneKind } from '../../core/sim/demand.js';
+import type { DynamoDbSessionSnapshot } from '../../core/scenario/dynamodb/liveSession.js';
 
 interface StatusHudProps {
   readonly snapshot: DynamoDbSessionSnapshot;
