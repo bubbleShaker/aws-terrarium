@@ -88,6 +88,21 @@ export interface AuroraSessionSnapshot {
   readonly queueLength: number;
   /** 待合室の占有率。**1 に達した瞬間から拒否が始まる**。 */
   readonly connectionUtilization: number;
+  /**
+   * 待合室が満席になるまでの残り秒数。**最初のエラーが出るまでの猶予**そのもの。
+   *
+   * まだ拒否が出ておらず、かつ行列が伸びている間だけ値を持つ
+   * （縮んでいるなら満席にはならないので `undefined`）。
+   *
+   * ⚠️ **いまの流入と処理の差が続くと仮定した外挿**であって、予測ではない。
+   * また、最初の拒否はこれより**わずかに早く**出る（1 tick ぶんの流入が
+   * 入りきらなくなった時点であふれるので、席が満杯になるのを待たない。誤差は数 %）。
+   *
+   * それでも View ではなくここに置いているのは、これが M3 の教材上の主張
+   * 「エラーが出るまでの数十秒、レイテンシだけが伸び続ける」を数字にしたものだからである。
+   * 主張を担う計算は Core に置いてテストで固定する（`test/auroraLiveSession.test.ts`）。
+   */
+  readonly secondsUntilConnectionsFull: number | undefined;
 
   /** Performance Insights の **AAS / DBLoad**。 */
   readonly activeSessions: number;
@@ -251,6 +266,7 @@ export class AuroraLiveSession {
 
       queueLength: writer.queueLength,
       connectionUtilization: latest?.connectionUtilization ?? 0,
+      secondsUntilConnectionsFull: secondsUntilFull(writer, latest),
 
       activeSessions: latest?.activeSessions ?? 0,
       activeSessionsPerVcpu: latest?.activeSessionsPerVcpu ?? 0,
@@ -262,6 +278,22 @@ export class AuroraLiveSession {
       statisticalMs: toMs(latest?.statisticalSeconds),
     };
   }
+}
+
+/**
+ * 待合室が満席になるまでの残り秒数。
+ *
+ * 「受理した量 − 捌けた量」がそのまま行列の伸びる速さなので、
+ * 残り席数をそれで割る。**すでに拒否が始まっているなら猶予は無い**ので undefined。
+ */
+function secondsUntilFull(
+  writer: AuroraWriter,
+  latest: AuroraWriterTickResult | undefined,
+): number | undefined {
+  if (latest === undefined || latest.rejectedRequestsPerSec > 0) return undefined;
+  const growthPerSec = latest.acceptedRequestsPerSec - latest.servedRequestsPerSec;
+  if (growthPerSec <= 0) return undefined;
+  return Math.max(0, writer.maxConnections - writer.queueLength) / growthPerSec;
 }
 
 function buildWriter(settings: AuroraLiveSettings): AuroraWriter {
