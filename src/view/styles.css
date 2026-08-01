@@ -38,26 +38,39 @@ body {
   touch-action: none;
 }
 
-.panel {
+/*
+  パネルを縦に積む列。位置決めは列が持ち、パネルは見た目だけを持つ。
+  M3 で左に 2 枚 (DynamoDB / Aurora) 積むことになったので、
+  パネル自身が絶対配置を持つ形だと高さが可変なぶん重なる。
+*/
+.rail {
   position: absolute;
   top: 16px;
-  width: 320px;
-  max-height: calc(100% - 32px);
+  bottom: 16px;
+  width: 330px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
   overflow-y: auto;
+  scrollbar-width: thin;
+}
+
+.rail--left {
+  left: 16px;
+}
+
+.rail--right {
+  right: 16px;
+}
+
+.panel {
+  flex: 0 0 auto;
   padding: 16px;
   border: 1px solid var(--line);
   border-radius: 12px;
   background: var(--panel);
   backdrop-filter: blur(10px);
   line-height: 1.6;
-}
-
-.panel--status {
-  left: 16px;
-}
-
-.panel--controls {
-  right: 16px;
 }
 
 .panel__title {
@@ -139,6 +152,32 @@ body {
   background: var(--hot);
 }
 
+.bar__fill--ok {
+  background: var(--accent);
+}
+
+.bar__fill--seat {
+  background: #e8b23c;
+}
+
+/*
+  Performance Insights の Max vCPU 線。目盛りを「Max vCPU の 2 倍」で取ってあるので、
+  線は常に中央に立つ。これを超えたら待ち行列ができている、というあの読み方をそのまま持ち込む。
+*/
+.bar--vcpu {
+  position: relative;
+  height: 10px;
+}
+
+.bar__mark {
+  position: absolute;
+  top: -2px;
+  bottom: -2px;
+  left: 50%;
+  width: 2px;
+  background: var(--hot);
+}
+
 .detail {
   margin: 8px 0 0;
   padding-left: 16px;
@@ -198,6 +237,18 @@ body {
 .swatch--cap {
   background: rgba(255, 107, 91, 0.5);
   border: 1px solid var(--hot);
+}
+
+.swatch--seat {
+  background: #e8b23c;
+}
+
+.swatch--gate {
+  background: linear-gradient(135deg, #1f3a4d, #5ef2c0);
+}
+
+.swatch--wait {
+  background: linear-gradient(135deg, #3fd6ff, #d9a441 60%, #ff2a14);
 }
 
 .control {
@@ -291,13 +342,142 @@ input[type='checkbox'] {
   border-top: 1px solid var(--line);
 }
 
+/*
+  並置の看板。**画面の中央下**に置く。
+  左右のパネルはサービスごとの詳細だが、ここは 2 つを同じ行に並べる場所なので、
+  どちらの側にも寄せない位置にある必要がある。
+*/
+.compare {
+  /*
+    DOM 上は左の列の中にあるが、ここでは画面基準で中央へ抜き出す。
+    左右どちらのパネルにも寄らない位置に置けることが、
+    「2 つを同じ行に並べる」という役目にとって本質的である。
+  */
+  position: fixed;
+  left: 50%;
+  bottom: 16px;
+  transform: translateX(-50%);
+  width: min(460px, 100vw - 724px);
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel);
+  backdrop-filter: blur(10px);
+  line-height: 1.6;
+}
+
+.compare__head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+  font-size: 11.5px;
+  color: var(--muted);
+}
+
+.compare__head b {
+  color: var(--text);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+.compare__clock {
+  flex: 0 0 auto;
+  font-variant-numeric: tabular-nums;
+}
+
+.compare__table {
+  width: 100%;
+  border-collapse: collapse;
+  font-variant-numeric: tabular-nums;
+}
+
+.compare__table th,
+.compare__table td {
+  padding: 4px 8px;
+  text-align: right;
+  font-weight: 400;
+}
+
+.compare__table thead th {
+  color: var(--muted);
+  font-size: 11px;
+  border-bottom: 1px solid var(--line);
+}
+
+.compare__table tbody th {
+  text-align: left;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.compare__row--latency td {
+  padding-top: 8px;
+  font-size: 15px;
+}
+
+.compare__row--latency b {
+  color: var(--hot);
+}
+
+/* 拒否 0 は「まだ何も壊れていない」ではなく「まだ気づけない」の合図なので、沈めて出す。 */
+.compare__quiet {
+  color: var(--muted);
+}
+
+.compare__ratio {
+  margin-left: 6px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.compare__mark {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.compare__verdict {
+  margin: 10px 0 0;
+  padding: 8px 10px;
+  border-left: 2px solid var(--accent);
+  border-radius: 0 6px 6px 0;
+  background: rgba(94, 242, 192, 0.07);
+  font-size: 11.5px;
+}
+
+.compare__verdict--warn {
+  border-left-color: var(--hot);
+  background: rgba(255, 90, 77, 0.12);
+}
+
+/*
+  `layout.ts` の VISIBLE_WIDTH_FRACTION = 0.5 が成り立つのは、
+  左右のパネルが画面幅の半分未満に収まっている間だけ（330px × 2 + 余白 = 724px なら 1,448px 以上）。
+  それより狭い画面では、3D の敷地がパネルの下に潜らないようパネル側を詰める。
+*/
+@media (max-width: 1447px) {
+  .rail {
+    width: 280px;
+  }
+}
+
+@media (max-width: 1240px) {
+  /* 中央に置く幅が無くなったら、DOM 上の位置（左の列の一番上）へそのまま畳む。 */
+  .compare {
+    position: static;
+    transform: none;
+    width: auto;
+  }
+}
+
 @media (max-width: 900px) {
-  .panel {
+  .rail {
     width: calc(100% - 32px);
     max-height: 40%;
+    bottom: auto;
   }
 
-  .panel--controls {
+  .rail--right {
     top: auto;
     bottom: 16px;
   }

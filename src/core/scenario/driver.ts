@@ -10,6 +10,8 @@ import {
   type DynamoDbLiveSettings,
   type DynamoDbSessionSnapshot,
 } from './dynamodb/liveSession.js';
+import type { AuroraWriter } from '../services/aurora/writer.js';
+import type { DynamoDbTable } from '../services/dynamodb/table.js';
 
 export interface TerrariumDriverConfig {
   /** 負荷ダイヤルの初期値。**1 本しかない**。 */
@@ -20,18 +22,34 @@ export interface TerrariumDriverConfig {
 }
 
 /**
- * driver の外へ見せるセッション。**`step` だけを取り除いてある**。
+ * driver の外へ見せるセッション。**時間を進める手段をすべて取り除いてある**。
  *
  * 3D は毎フレーム `latest` を直読みする必要があるのでセッション自体は公開せざるを得ないが、
  * `step` に手が届くと `driver.aurora.step(demand, 5)` と書けてしまい、
  * 片方だけ仮想時間が進む — 時計を 1 本にした意味が消える。
  * 型で外しておけば、その 1 行はコンパイルを通らない。
+ *
+ * ⚠️ セッションから `step` を外すだけでは足りない。セッションは `writer` / `table` という
+ * **モデル本体への参照**を 3D のために公開しており、そちらの `step` は素通りするので
+ * `driver.aurora.writer.step(demand, 5)` と書けてしまう。
+ * 同じ理由で `retryPolicy` の setter も塞ぐ（設定を通さずに writer だけ変えると、
+ * `AuroraLiveSettings` と実体が乖離して ControlPanel の表示が嘘になる）。
+ * → モデル本体も投影した型で返す。
  */
 export type DrivenSession<T> = Omit<T, 'step'>;
 
+/** 3D が読むだけの writer。**駆動する手段も設定を変える手段も含まれていない**。 */
+export type ObservedAuroraWriter = Omit<AuroraWriter, 'step' | 'retryPolicy'>;
+/** 3D が読むだけのテーブル。 */
+export type ObservedDynamoDbTable = Omit<DynamoDbTable, 'step'>;
+
 /** View（3D・HUD）が受け取るセッションの型。時間を進める手段は含まれていない。 */
-export type DrivenDynamoDbSession = DrivenSession<DynamoDbLiveSession>;
-export type DrivenAuroraSession = DrivenSession<AuroraLiveSession>;
+export type DrivenDynamoDbSession = Omit<DrivenSession<DynamoDbLiveSession>, 'table'> & {
+  readonly table: ObservedDynamoDbTable;
+};
+export type DrivenAuroraSession = Omit<DrivenSession<AuroraLiveSession>, 'writer'> & {
+  readonly writer: ObservedAuroraWriter;
+};
 
 /** 画面 1 枚ぶんの状態を、**同一時刻**で切り出したもの。 */
 export interface TerrariumSnapshot {

@@ -27,7 +27,7 @@ export function StatusHud({ snapshot, lane, lesson, presetName }: StatusHudProps
     hottest !== undefined && hottest.throttleRate - view.throttleRate > 0.05;
 
   return (
-    <aside className="panel panel--status">
+    <aside className="panel">
       <h2 className="panel__title">
         DynamoDB <span className="panel__sub">{presetName}</span>
       </h2>

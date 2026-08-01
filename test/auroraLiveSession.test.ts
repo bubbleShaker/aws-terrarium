@@ -198,4 +198,57 @@ describe('AuroraLiveSession', () => {
     advanceSeconds(session, 30, load(SAFE_RPS));
     expect(session.snapshot().queueLength).toBe(0);
   });
+
+  /**
+   * 満席までの残り秒数 = **最初のエラーが出るまでの猶予**。
+   *
+   * M3 の主張「エラーが出るまでの数十秒、レイテンシだけが伸び続ける」を数字にしたもの。
+   * 教材の主張を担う計算なので View ではなくここで固定する。
+   */
+  describe('secondsUntilConnectionsFull', () => {
+    it('ρ=1.05 では、実際に拒否が始まる時刻をほぼ言い当てる', () => {
+      const session = new AuroraLiveSession(baseSettings);
+      const overload = load(CAPACITY_PER_SEC * 1.05); // 420 q/s → 20 q/s ずつ積み上がる
+
+      advanceSeconds(session, 1, overload);
+      const predicted = session.snapshot().secondsUntilConnectionsFull;
+      expect(predicted).toBeDefined();
+      if (predicted === undefined) return;
+
+      // 1 秒経過した時点で残り 980 席 / 20 q/s = 49 秒。
+      expect(predicted).toBeCloseTo(49, 0);
+
+      // 実際に最初の拒否が出るまで進める。
+      let elapsed = 0;
+      while (session.snapshot().rejectedRequestsPerSec === 0 && elapsed < 120) {
+        session.step(overload, TICK_SECONDS);
+        elapsed += TICK_SECONDS;
+      }
+      expect(elapsed).toBeLessThan(120);
+
+      // ⚠️ 拒否は満席の**わずかに手前**で始まる。1 tick ぶんの流入が入りきらなくなった時点で
+      // あふれるので、席が 1,000 に達するのを待たない。誤差はその 1 tick ぶん（数 %）。
+      // 「あと何十秒でエラーが出るか」という使い方には十分な精度である。
+      expect(elapsed).toBeLessThanOrEqual(predicted);
+      expect(elapsed).toBeGreaterThan(predicted * 0.9);
+    });
+
+    it('行列が伸びていない間、および拒否が始まった後は値を持たない', () => {
+      const session = new AuroraLiveSession(baseSettings);
+
+      // ρ<1。行列は伸びないので「満席になるまで」は定義できない。
+      advanceSeconds(session, 5, load(SAFE_RPS));
+      expect(session.snapshot().secondsUntilConnectionsFull).toBeUndefined();
+
+      // 満席まで振り切ったあと。猶予はもう無い。
+      advanceSeconds(session, 60, load(SPIKE_RPS));
+      expect(session.snapshot().rejectedRequestsPerSec).toBeGreaterThan(0);
+      expect(session.snapshot().secondsUntilConnectionsFull).toBeUndefined();
+    });
+
+    it('進める前は値を持たない', () => {
+      expect(new AuroraLiveSession(baseSettings).snapshot().secondsUntilConnectionsFull)
+        .toBeUndefined();
+    });
+  });
 });

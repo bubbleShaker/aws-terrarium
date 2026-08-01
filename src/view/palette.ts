@@ -53,3 +53,49 @@ export function acceptedColor(throttleRate: number, target: Color): Color {
   return target.copy(ACCEPTED_HEALTHY).lerp(ACCEPTED_THROTTLED, Math.min(1, throttleRate * 1.6));
 }
 
+/**
+ * Aurora のレイテンシを色にする。
+ *
+ * **DynamoDB の赤熱 (`heatColor`) とは別の尺度で塗る**。
+ * あちらの赤は「需要が物理上限を越えている」、こちらの色は「待たされている」で、
+ * 意味が違うものを同じ色で塗ると、並べたときに壊れ方の違いが消える。
+ *
+ * 目盛りは 10 倍ごとに取ってある。ミリ秒から秒への 3 桁を線形で塗ると、
+ * 「まだ 50ms なのに既に 10 倍遅い」という飽和前の劣化が全部同じ色に潰れるため。
+ */
+const WAIT_STOPS: { at: number; color: Color }[] = [
+  { at: 0.005, color: new Color('#3fd6ff') }, // 5ms: 待っていない
+  { at: 0.05, color: new Color('#5ef2c0') }, // 50ms: ゆらぎで待ち始めた
+  { at: 0.5, color: new Color('#d9a441') }, // 500ms: 人間が気づく
+  { at: 5, color: new Color('#ff2a14') }, // 5s: タイムアウトの領域
+];
+
+export function waitColor(latencySeconds: number, target: Color): Color {
+  const first = WAIT_STOPS[0];
+  const last = WAIT_STOPS[WAIT_STOPS.length - 1];
+  if (first === undefined || last === undefined) return target.set('#ffffff');
+
+  const seconds = Number.isFinite(latencySeconds) ? latencySeconds : last.at;
+  if (seconds <= first.at) return target.copy(first.color);
+  if (seconds >= last.at) return target.copy(last.color);
+
+  for (let i = 1; i < WAIT_STOPS.length; i += 1) {
+    const prev = WAIT_STOPS[i - 1];
+    const next = WAIT_STOPS[i];
+    if (prev === undefined || next === undefined) break;
+    if (seconds <= next.at) {
+      // 対数で補間する。目盛りが 10 倍刻みなので、線形に混ぜると上の桁に偏る。
+      const t = Math.log(seconds / prev.at) / Math.log(next.at / prev.at);
+      return target.copy(prev.color).lerp(next.color, t);
+    }
+  }
+  return target.copy(last.color);
+}
+
+/** 待合室の席。空いている席は構造として見えるが、埋まった席は主張する。 */
+export const SEAT_EMPTY = new Color('#1a2433');
+export const SEAT_TAKEN = new Color('#e8b23c');
+/** vCPU の窓口。仕事をしている間だけ光る。 */
+export const GATE_IDLE = new Color('#1f3a4d');
+export const GATE_BUSY = new Color('#5ef2c0');
+
