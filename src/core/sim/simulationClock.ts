@@ -28,7 +28,11 @@ export interface SimulationClockConfig {
 }
 
 export const DEFAULT_TICK_SECONDS = 0.1;
-const DEFAULT_MAX_TICKS_PER_FRAME = 8;
+/**
+ * 60fps で 60 倍速 (1 フレーム 10 tick) まで捨てずに回せる値。
+ * バーストの貯金が尽きるまで 300 秒かかるので、早送りは教材上どうしても要る。
+ */
+const DEFAULT_MAX_TICKS_PER_FRAME = 16;
 
 export class SimulationClock {
   readonly #tickSeconds: number;

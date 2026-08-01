@@ -7,16 +7,30 @@
   "license": "MIT",
   "author": "bubbleShaker",
   "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
     "test": "vitest run",
     "test:watch": "vitest",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.view.json",
     "scenario": "tsx src/cli/runScenario.ts",
     "check": "npm run typecheck && npm test"
   },
   "devDependencies": {
     "@types/node": "^26.1.2",
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.4",
+    "@vitejs/plugin-react": "^5.2.0",
     "tsx": "^4.20.6",
     "typescript": "^5.9.3",
+    "vite": "^7.3.6",
     "vitest": "^3.2.4"
+  },
+  "dependencies": {
+    "@react-three/drei": "^10.7.7",
+    "@react-three/fiber": "^9.7.0",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "three": "^0.185.1"
   }
 }

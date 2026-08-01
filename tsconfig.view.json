@@ -1,9 +1,11 @@
 {
+  "//": "View 層専用。Core 側 (tsconfig.json) には DOM を入れていないので、ここだけが window / document に触れる。",
   "compilerOptions": {
     "target": "ES2022",
-    "lib": ["ES2022"],
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
     "module": "ESNext",
     "moduleResolution": "bundler",
+    "jsx": "react-jsx",
     "strict": true,
     "noUncheckedIndexedAccess": true,
     "noImplicitOverride": true,
@@ -13,8 +15,7 @@
     "esModuleInterop": true,
     "skipLibCheck": true,
     "noEmit": true,
-    "types": ["node"]
+    "types": []
   },
-  "//": "Core / CLI / テスト用。lib に DOM を入れていないのは、Core が window や document に触れたらコンパイルエラーにするため。View は tsconfig.view.json を使う。",
-  "include": ["src/core", "src/cli", "test", "vite.config.ts"]
+  "include": ["src/view", "src/core"]
 }
