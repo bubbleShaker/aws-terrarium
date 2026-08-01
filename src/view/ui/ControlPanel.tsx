@@ -1,15 +1,15 @@
 import { useState } from 'react';
 import type { JSX, ReactNode } from 'react';
-import type { LaneKind, LiveSettings } from '../../core/scenario/liveSession.js';
+import type { LaneKind, DynamoDbLiveSettings } from '../../core/scenario/dynamoDbLiveSession.js';
 import { type LivePreset, livePresets } from '../../core/scenario/livePresets.js';
 import type { KeyDistributionSpec } from '../../core/services/dynamodb/keyDistribution.js';
 
 interface ControlPanelProps {
-  readonly settings: LiveSettings;
+  readonly settings: DynamoDbLiveSettings;
   readonly lane: LaneKind;
   readonly presetName: string;
   readonly timeScale: number;
-  readonly onChange: (patch: Partial<LiveSettings>) => void;
+  readonly onChange: (patch: Partial<DynamoDbLiveSettings>) => void;
   readonly onLoadPreset: (preset: LivePreset) => void;
   readonly onLaneChange: (lane: LaneKind) => void;
   readonly onTimeScaleChange: (scale: number) => void;

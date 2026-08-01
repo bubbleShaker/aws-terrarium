@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { LiveSession, type LiveSettings } from '../src/core/scenario/liveSession.js';
+import { DynamoDbLiveSession, type DynamoDbLiveSettings } from '../src/core/scenario/dynamoDbLiveSession.js';
 import { defaultLivePreset, findLivePreset, livePresets } from '../src/core/scenario/livePresets.js';
 import { PARTITION_MAX_WRITE_UNITS_PER_SEC } from '../src/core/services/dynamodb/limits.js';
 
-const baseSettings: LiveSettings = {
+const baseSettings: DynamoDbLiveSettings = {
   readsPerSecond: 0,
   writesPerSecond: 30_000,
   distribution: { kind: 'uniform' },
@@ -20,14 +20,14 @@ const baseSettings: LiveSettings = {
 };
 
 /** `seconds` 秒ぶん進める。フレームは 60fps 相当。 */
-function advanceSeconds(session: LiveSession, seconds: number): void {
+function advanceSeconds(session: DynamoDbLiveSession, seconds: number): void {
   const frames = Math.ceil(seconds * 60);
   for (let i = 0; i < frames; i += 1) session.advance(1 / 60);
 }
 
-describe('LiveSession', () => {
+describe('DynamoDbLiveSession', () => {
   it('負荷だけを変えてもテーブルを作り直さない', () => {
-    const session = new LiveSession(baseSettings);
+    const session = new DynamoDbLiveSession(baseSettings);
     advanceSeconds(session, 1);
     const before = session.table;
 
@@ -40,7 +40,7 @@ describe('LiveSession', () => {
   });
 
   it('テーブルの形が変わる設定はテーブルを作り直す', () => {
-    const session = new LiveSession(baseSettings);
+    const session = new DynamoDbLiveSession(baseSettings);
     advanceSeconds(session, 1);
     const before = session.table;
 
@@ -54,9 +54,9 @@ describe('LiveSession', () => {
   });
 
   it('同じ内容の設定を渡し直しても作り直さない（プロパティの順序が違っても）', () => {
-    const session = new LiveSession(baseSettings);
+    const session = new DynamoDbLiveSession(baseSettings);
     // キーの並び順だけを変えた、内容としては同一の設定。
-    const reordered: LiveSettings = {
+    const reordered: DynamoDbLiveSettings = {
       consistentRead: true,
       itemSizeKb: 1,
       tableSizeGb: 10,
@@ -86,10 +86,10 @@ describe('LiveSession', () => {
     expect(zipf).toBeDefined();
     if (bigItem === undefined || zipf === undefined) return;
 
-    const direct = new LiveSession(zipf.settings);
+    const direct = new DynamoDbLiveSession(zipf.settings);
     advanceSeconds(direct, 60);
 
-    const viaBigItem = new LiveSession(bigItem.settings);
+    const viaBigItem = new DynamoDbLiveSession(bigItem.settings);
     viaBigItem.replace(zipf.settings);
     advanceSeconds(viaBigItem, 60);
 
@@ -102,7 +102,7 @@ describe('LiveSession', () => {
   });
 
   it('進める前でも snapshot が柱の本数ぶん揃っている（View に分岐を持ち込まないため）', () => {
-    const session = new LiveSession(baseSettings);
+    const session = new DynamoDbLiveSession(baseSettings);
     const snapshot = session.snapshot();
 
     expect(snapshot.write.partitions).toHaveLength(session.table.partitionCount);
@@ -112,7 +112,7 @@ describe('LiveSession', () => {
   });
 
   it('singleHot では 1 本だけが物理上限を振り切り、他は冷たいまま', () => {
-    const session = new LiveSession({
+    const session = new DynamoDbLiveSession({
       ...baseSettings,
       distribution: { kind: 'singleHot', hotRatio: 0.9 },
     });
@@ -142,7 +142,7 @@ describe('LiveSession', () => {
     expect(preset).toBeDefined();
     if (preset === undefined) return;
 
-    const session = new LiveSession(preset.settings);
+    const session = new DynamoDbLiveSession(preset.settings);
 
     advanceSeconds(session, 60);
     const early = session.snapshot().write.hottest;
@@ -163,8 +163,8 @@ describe('LiveSession', () => {
     expect(zipfAdaptive).toBeDefined();
     if (zipf === undefined || zipfAdaptive === undefined) return;
 
-    const off = new LiveSession(zipf.settings);
-    const on = new LiveSession(zipfAdaptive.settings);
+    const off = new DynamoDbLiveSession(zipf.settings);
+    const on = new DynamoDbLiveSession(zipfAdaptive.settings);
     // バーストの貯金が尽きるまで進めないと差が出ない (M1 の発見)。
     advanceSeconds(off, 400);
     advanceSeconds(on, 400);
@@ -199,7 +199,7 @@ describe('livePresets', () => {
 
   it('どのプリセットもそのままセッションを構築して進められる', () => {
     for (const preset of livePresets) {
-      const session = new LiveSession(preset.settings);
+      const session = new DynamoDbLiveSession(preset.settings);
       advanceSeconds(session, 2);
       const snapshot = session.snapshot();
       expect(snapshot.partitionCount).toBeGreaterThan(0);
@@ -212,7 +212,7 @@ describe('livePresets', () => {
     expect(preset).toBeDefined();
     if (preset === undefined) return;
 
-    const session = new LiveSession(preset.settings);
+    const session = new DynamoDbLiveSession(preset.settings);
     advanceSeconds(session, 5);
     const { read } = session.snapshot();
 

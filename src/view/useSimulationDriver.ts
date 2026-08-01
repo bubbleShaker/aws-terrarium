@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import type { LiveSession, SessionSnapshot } from '../core/scenario/liveSession.js';
+import type { DynamoDbLiveSession, DynamoDbSessionSnapshot } from '../core/scenario/dynamoDbLiveSession.js';
 
 /**
  * シミュレーションを実時間で回し、HUD 用のスナップショットを間引いて配る。
@@ -18,8 +18,8 @@ import type { LiveSession, SessionSnapshot } from '../core/scenario/liveSession.
  * HUD の数字は 10Hz もあれば十分読めるので、そこで止める。
  * 3D は React の再描画を経由せず `session.latest` を直接読むので影響を受けない。
  */
-export function useSimulationDriver(session: LiveSession, hudHz = 10): SessionSnapshot {
-  const [snapshot, setSnapshot] = useState<SessionSnapshot>(() => session.snapshot());
+export function useSimulationDriver(session: DynamoDbLiveSession, hudHz = 10): DynamoDbSessionSnapshot {
+  const [snapshot, setSnapshot] = useState<DynamoDbSessionSnapshot>(() => session.snapshot());
 
   useEffect(() => {
     let frame = 0;
