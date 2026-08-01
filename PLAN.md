@@ -225,7 +225,8 @@ M1 で一番伝えたい「単一キーは分割できない」に直結する�
 ### View から Core を駆動する道具（M2 で用意済み・そのまま使える）
 
 ```ts
-import { DynamoDbLiveSession } from './core/scenario/dynamodb/liveSession.js';
+// src/view/App.tsx から見たパス
+import { DynamoDbLiveSession } from '../core/scenario/dynamodb/liveSession.js';
 
 const session = new DynamoDbLiveSession(settings); // 設定を渡してセッションを作る
 session.advance(frameDeltaSeconds);          // 固定タイムステップで進む。返り値は刻んだ tick 数
@@ -257,7 +258,9 @@ Aurora を足すときは、**この `DynamoDbLiveSession` 相当を Aurora 用�
 ```
 src/core/
 ├── sim/                  ← サービス非依存の土台。Aurora もそのまま使う
-│   ├── rng.ts  tokenBucket.ts  simulationClock.ts  loadProfile.ts  particleSampling.ts
+│   └── demand.ts  loadProfile.ts  rng.ts  simulationClock.ts
+│       tokenBucket.ts  particleSampling.ts
+│       ※ demand.ts の `Demand` は両サービスが受け取る共有の負荷型
 ├── services/
 │   ├── dynamodb/         table.ts / partitioning.ts / keyDistribution.ts …
 │   └── aurora/           ← M3 で新設。writer.ts（待ち行列モデル本体）
@@ -265,6 +268,10 @@ src/core/
     ├── dynamodb/         liveSession.ts / livePresets.ts / presets.ts / runScenario.ts
     └── aurora/           ← M3 で新設。liveSession.ts / livePresets.ts
 ```
+
+テストは `test/` にフラットに置き、**対象の識別子名に合わせる**
+（`dynamoDbLiveSession.test.ts` / `dynamoDbScenario.test.ts`）。
+`test/` 側もディレクトリで名前空間を切るかは、Aurora のテストが増えてから判断する。
 
 **ディレクトリが名前空間を担う**ので、ファイル名に接頭辞は付けない
 （`scenario/dynamodb/liveSession.ts`。`dynamoDbLiveSession.ts` ではない）。
@@ -276,10 +283,25 @@ export しているのと同じ慣習に揃える。
 | 接頭辞を付ける | 付けない |
 |---|---|
 | `DynamoDbLiveSession` / `DynamoDbLiveSettings` / `DynamoDbSessionSnapshot` | `PartitionView` / `LaneView` / `LaneInfo` |
-| `DynamoDbLivePreset` / `dynamoDbLivePresets` / `defaultDynamoDbLivePreset` | `Scenario` / `runScenario` / `presets`（バッチ用・CLI 専用） |
+| `DynamoDbLivePreset` / `dynamoDbLivePresets` / `defaultDynamoDbLivePreset` / `findDynamoDbLivePreset` | **`runScenario.ts` / `presets.ts` が export するものはすべて**（`Scenario` / `ScenarioResult` / `PartitionSummary` / `presets` / `findPreset` / 各シナリオ定数 …） |
 
 線引きの基準は「**1 つのファイルが両サービスを同時に import するか**」。
-バッチ経路（`runScenario.ts` / `presets.ts`）はその状況が来ないので素のままでよい。
+バッチ経路（`runScenario.ts` / `presets.ts`）は CLI 専用でその状況が来ないので素のままでよい。
+
+**バッチ経路が衝突したらどうするか**（M3 で並置ドライバを CLI 側にも作る場合）:
+接頭辞は付けず、**名前空間 import で受ける**。
+
+```ts
+import * as dynamodb from './scenario/dynamodb/runScenario.js';
+import * as aurora   from './scenario/aurora/runScenario.js';
+```
+
+17 個の export に接頭辞を付けて回るより安い。この判断を先に決めておくのは、
+M3 で同じ議論が再燃するのを防ぐため。
+
+⚠️ ただし `PartitionSummary` だけは別の問題を抱えている。**Aurora にパーティションは存在しない**ので、
+これは import 衝突とは無関係に「汎用の名前で DynamoDB 固有の形を指している」— `LiveSession` で直したのと
+同じ罠が残っている。バッチ経路に手を入れるときに一緒に直す。
 
 ### M3 で気をつけること
 
