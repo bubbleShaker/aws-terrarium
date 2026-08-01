@@ -38,16 +38,23 @@ CloudFront / Lambda / EventBridge / EFS / S3 / Step Functions
 
 ## 状態
 
-M1（Core engine + DynamoDB パーティションモデル）を実装中。
+M2 まで完了。**DynamoDB を 3D 空間で動かせる**（負荷ダイヤル・キー分布の切り替え・
+アダプティブキャパシティの ON/OFF）。次は M3（Aurora を並置して壊れ方の違いを見せる）。
 進捗は [PLAN.md](./PLAN.md) のマイルストーン表を参照。
+
+`npm run dev` を開いて `single-hot-key` プリセットを選ぶと、
+**41 本のうち 1 本だけが物理上限の面を突き抜けて赤熱し、頂上でリクエストが赤く弾け散る**。
+テーブルには 40,000 WCU 積んであるのに、である。
 
 ## 開発
 
 ```bash
 npm install
-npm test          # Core 層の単体テスト
-npm run scenario  # CLI でシナリオを走らせて結果を表示
-npm run dev       # 3D ビューを開発サーバーで起動 (M2 以降)
+npm run dev        # 3D ビューを開発サーバーで起動
+npm test           # Core 層の単体テスト (107 件)
+npm run typecheck  # Core と View を別々の tsconfig で型検査
+npm run scenario   # CLI でシナリオを走らせて結果を表示 (3D 抜き)
+npm run build      # 静的ビルド
 ```
 
 ## ディレクトリ

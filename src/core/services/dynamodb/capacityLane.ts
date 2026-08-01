@@ -93,6 +93,16 @@ export class CapacityLane {
     return this.#baselineRatePerSec;
   }
 
+  /** 1 パーティションが貯められる貯金の上限 (units)。View がゲージの満タンを描くのに要る。 */
+  get burstCapacityUnits(): number {
+    return this.#baselineRatePerSec * BURST_WINDOW_SECONDS;
+  }
+
+  /** 1 パーティションの物理上限 (units/秒)。 */
+  get hardCapUnitsPerSec(): number {
+    return this.#config.perPartitionMaxPerSec;
+  }
+
   /**
    * 1 tick 進める。`demandPerPartition` はパーティションごとの需要 (units/秒)。
    */

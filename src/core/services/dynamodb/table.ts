@@ -62,6 +62,16 @@ export interface LaneTickResult {
   readonly partitions: readonly PartitionLaneResult[];
 }
 
+/** レーンの静的な諸元 (tick に依存しない値)。 */
+export interface LaneInfo {
+  /** 頭割りしたときの 1 パーティションあたりの取り分 (units/秒)。 */
+  readonly baselineUnitsPerSec: number;
+  /** 1 パーティションの物理上限 (units/秒)。3,000 (read) / 1,000 (write)。 */
+  readonly hardCapUnitsPerSec: number;
+  /** 1 パーティションが貯められるバーストの上限 (units)。 */
+  readonly burstCapacityUnits: number;
+}
+
 export interface DynamoDbTickResult {
   readonly timeSeconds: number;
   readonly read: LaneTickResult;
@@ -103,6 +113,7 @@ export class DynamoDbTable {
   readonly #readUnitsPerRequest: number;
   readonly #writeUnitsPerRequest: number;
   readonly #adaptiveCapacity: boolean;
+  readonly #lanes: { readonly read: LaneInfo; readonly write: LaneInfo };
   #elapsedSeconds = 0;
 
   constructor(config: DynamoDbTableConfig) {
@@ -138,6 +149,8 @@ export class DynamoDbTable {
 
     this.#readUnitsPerRequest = readUnitsPerRequest(config.itemSizeKb, config.consistentRead);
     this.#writeUnitsPerRequest = writeUnitsPerRequest(config.itemSizeKb);
+
+    this.#lanes = { read: toLaneInfo(this.#readLane), write: toLaneInfo(this.#writeLane) };
   }
 
   get partitionCount(): number {
@@ -167,6 +180,15 @@ export class DynamoDbTable {
 
   get elapsedSeconds(): number {
     return this.#elapsedSeconds;
+  }
+
+  /**
+   * レーンの静的な諸元。tick ごとに変わらないので、
+   * View が「柱の高さの基準」「ゲージの満タン」を決めるのに使う。
+   */
+  get lanes(): { readonly read: LaneInfo; readonly write: LaneInfo } {
+    // 毎フレーム読まれるので、構築時に 1 度だけ作って使い回す。
+    return this.#lanes;
   }
 
   /** シミュレーションを 1 tick 進める。 */
@@ -264,6 +286,14 @@ function resolveCapacity(capacity: CapacityConfig): ResolvedCapacity {
     sizingReadUnits: capacity.peakReadUnitsPerSec,
     sizingWriteUnits: capacity.peakWriteUnitsPerSec,
     adaptive: true,
+  };
+}
+
+function toLaneInfo(lane: CapacityLane): LaneInfo {
+  return {
+    baselineUnitsPerSec: lane.baselineRatePerSec,
+    hardCapUnitsPerSec: lane.hardCapUnitsPerSec,
+    burstCapacityUnits: lane.burstCapacityUnits,
   };
 }
 

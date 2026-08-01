@@ -67,7 +67,7 @@ seed 付き PRNG により、同じ設定なら常に同じ結果 → **単体�
 |---|---|---|
 | **M0** | 調査・PLAN・リポジトリ整備 | ✅ 完了 |
 | **M1** | Core engine の骨格 + DynamoDB パーティションモデル（3D なし・テストと CLI のみ） | ✅ 完了 |
-| **M2** | three.js 空間に DynamoDB を投入。ダイヤルで負荷を上げ、1 本だけ赤熱するのを目撃する | |
+| **M2** | three.js 空間に DynamoDB を投入。ダイヤルで負荷を上げ、1 本だけ赤熱するのを目撃する | ✅ 完了 |
 | **M3** | Aurora writer モデル追加。**同じ負荷を両方に流して並置**する | |
 | **M4** | 残りのサービスを順次追加（SQS / Lambda / S3 / SNS / EventBridge / Step Functions …） | |
 | **M5** | リソース間の関係性（IAM ポリシー・VPC・SG・アタッチメント）を空間の「配線」として表現 | |
@@ -131,9 +131,10 @@ M1 に含めないもの: GSI、トランザクション、Streams、3D、Aurora
 
 `test/capacityLane.test.ts` で検証している。無から容量を生み出していないことが健全性の根幹。
 
-## M2 の入口（新しいセッションはここから読む）
+## M2 の入口（実装済み。View と Core の契約として残す）
 
-M1 を実装した文脈が無くても M2 を始められるように、必要な情報をここに集約する。
+以下は M2 の着手前に書いた設計メモだが、**実装後もそのまま契約として有効**なので残す。
+実装の結果どうなったかは `summary/260801-m2-three-js-view.md` を参照。
 
 ### View 層が Core に対して知るべきこと
 
@@ -196,12 +197,64 @@ M1 で一番伝えたい「単一キーは分割できない」に直結する�
 > ダイヤルで負荷を上げていくと、**1 本の柱だけが赤熱して粒子を弾き始める**。
 > キー分布を `uniform` → `singleHot` に切り替えると、その瞬間に絵が変わる。
 
-### 依存関係（未インストール）
+### M2 の実装で当初の想定と変わったこと
 
-`vite` / `react` / `react-dom` / `three` / `@react-three/fiber` / `@react-three/drei`。
-`photo-orb` (`~/git/photo-orb`) が同じ構成で動いているので、バージョンはそちらを参照するとよい。
-`tsconfig.json` の `lib` から `DOM` を外してあるので、View 用に別 tsconfig を切る必要がある
-（Core が `document` / `window` に触れないようコンパイラでも守るため）。
+**アダプティブキャパシティを ON にしても、柱の色は変わらない。**
+
+赤熱の指標は `utilizationVsHardCap`（需要 ÷ 物理上限）と決めたが、
+アダプティブが変えるのは**通った量**であって需要ではない。つまり色は 1 ミリも動かない。
+
+そこで柱を二重構造にした:
+
+- 外側の半透明な柱 = **需要**（色 = 赤熱の指標）。アダプティブでは変わらない
+- 内側の実体の柱 = **通った量**。アダプティブで伸びる。頭打ちのとき黄色
+- 台座の色 = **バーストの貯金**。暗いほど残り少ない
+
+「弾かれた量」は外側と内側の差として、そのまま形で見える。
+赤は「需要が物理上限を越えている」ことだけに使う（内側まで赤くすると差が消えるため）。
+
+## M3 の入口（新しいセッションはここから読む）
+
+### 前提（M1 / M2 で確定済み・変えない）
+
+- Core 層 (`src/core/`) は three.js も React も知らない。`test/architecture.test.ts` が機械的に守る
+- Core は決定論的（seed 固定なら同じ結果）。フレームレートが揺れても結果が変わらないことは
+  `test/simulationClock.test.ts` が固定している
+- View は Core の状態を読んで描くだけ。ロジックを持たない
+
+### View から Core を駆動する道具（M2 で用意済み・そのまま使える）
+
+```ts
+import { LiveSession } from './core/scenario/liveSession.js';
+
+const session = new LiveSession(settings);   // 設定を渡してセッションを作る
+session.advance(frameDeltaSeconds);          // 固定タイムステップで進む。返り値は刻んだ tick 数
+session.latest;                              // 直近の tick 結果（毎フレーム読む用・生の数値）
+session.snapshot();                          // View 向けに整形した状態（HUD 用・10Hz 程度で読む）
+session.update({ writesPerSecond: 30_000 }); // 設定変更。テーブルの形が変わるなら作り直す
+session.clock.timeScale = 20;                // 早送り
+```
+
+Aurora を足すときは、**この `LiveSession` 相当を Aurora 用にもう 1 つ作る**のが素直。
+`DynamoDbTable` と `AuroraWriter` は内部モデルが違いすぎるので、
+無理に共通のインターフェースへ押し込めない（そこは M3 で判断する）。
+
+### M3 の着手時にやると決めてあること（M2 のレビュー指摘の持ち越し）
+
+- **`LiveSession` を `DynamoDbLiveSession` に改名する。** 名前だけが汎用で、
+  中身は `DynamoDbTable` を直接 new している。Aurora を足す前に名前を実態へ寄せる
+- **`SessionSnapshot` / `PartitionView` を View 層へ移すか検討する。** これは
+  「画面に出したい数字」で変わる presenter であり、Core の他の部分とは変更理由が違う。
+  Aurora と共用しようとすると必ず歪むので、そのタイミングで判断する
+
+### M3 で気をつけること
+
+- **同じ負荷を両方に流して並置する**のが M3 の本体。
+  片方ずつ見せても対比は生まれない。1 画面に 2 つ置く前提で空間を設計する
+- 粒子の表現が両者の差になる:
+  DynamoDB = 頂上で赤く散る / Aurora = writer の手前で**詰まって列を成す**
+- Aurora 側は「待ち行列 → レイテンシ」のモデルが要る。M2 までのモデルには時間軸の
+  待ち行列が存在しないので、Core に新しい概念が入る最初のケースになる
 
 ## M3 で対比させる核心
 
