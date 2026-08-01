@@ -155,7 +155,7 @@ export class AuroraWriter {
   readonly #serviceRatePerSec: number;
   /** 総容量 c × μ (件/秒)。 */
   readonly #capacityPerSec: number;
-  readonly #retry: AuroraRetryPolicy | undefined;
+  #retry: AuroraRetryPolicy | undefined;
 
   /** 待ち行列長 Q。M2 までのモデルには無かった「増えも減りもする滞留状態」。 */
   #queue = 0;
@@ -176,7 +176,8 @@ export class AuroraWriter {
     this.#serviceTimeSeconds = serviceTimeMs / 1_000;
     this.#serviceRatePerSec = 1 / this.#serviceTimeSeconds;
     this.#capacityPerSec = this.#spec.vcpu * this.#serviceRatePerSec;
-    this.#retry = config.retry;
+    // setter を通す。検証規則が 2 箇所に分かれると、片方だけ緩む。
+    this.retryPolicy = config.retry;
   }
 
   /** 壁A。Performance Insights の **Max vCPU 線**にあたる。 */
@@ -202,6 +203,29 @@ export class AuroraWriter {
     return this.#queue;
   }
 
+  get retryPolicy(): AuroraRetryPolicy | undefined {
+    return this.#retry;
+  }
+
+  /**
+   * 再送ポリシーを差し替える。**待ち行列 Q は持ち越す**。
+   *
+   * 諸元 (vCPU / max_connections / サービス時間) は構築時に確定させたままで、
+   * ここだけを可変にしているのは、再送が**サーバの設定ではなくクライアントの振る舞い**だからである。
+   * クライアント側を変えてもサーバに並んでいる客は消えない。
+   *
+   * この非対称性がそのまま教材になる — メタステーブル障害から抜け出せるのは
+   * 負荷を下げたときではなく、**増幅（再送）を断ち切ったとき**である。
+   * 差し替えでリセットしてしまうと、その因果が「リセットしたから直った」に見えてしまう。
+   */
+  set retryPolicy(policy: AuroraRetryPolicy | undefined) {
+    if (policy !== undefined) {
+      requirePositive(policy.clientTimeoutSeconds, 'clientTimeoutSeconds');
+      requirePositive(policy.clientPopulation, 'clientPopulation');
+    }
+    this.#retry = policy;
+  }
+
   get elapsedSeconds(): number {
     return this.#elapsedSeconds;
   }
@@ -217,7 +241,8 @@ export class AuroraWriter {
     //
     // ⚠️ NaN を必ずここで止める。Q は tick をまたいで持続する状態なので、
     // 一度でも NaN が混じると以降どんな正常な入力を流しても復帰しない
-    // （各 tick が独立している DynamoDB 側とは被害の質が違う）。
+    // （DynamoDB 側もバーストの貯金は tick をまたぐが、あちらは
+    //   1 パーティションのトークンが 1 つ壊れるだけで、行列のように全体を巻き込まない）。
     const demanded = finiteNonNegative(demand.readsPerSecond) + finiteNonNegative(demand.writesPerSecond);
     const retried = this.#retryRatePerSec();
     const offered = demanded + retried;
@@ -317,10 +342,7 @@ function validateConfig(config: AuroraWriterConfig, serviceTimeMs: number): void
     throw new RangeError(`未知のインスタンスクラス: ${config.instanceClass}`);
   }
   requirePositive(serviceTimeMs, 'serviceTimeMs');
-  if (config.retry !== undefined) {
-    requirePositive(config.retry.clientTimeoutSeconds, 'clientTimeoutSeconds');
-    requirePositive(config.retry.clientPopulation, 'clientPopulation');
-  }
+  // retry の検証は `retryPolicy` setter が持つ（構築時もそこを通る）。
 }
 
 function requirePositive(value: number, name: string): void {

@@ -1,11 +1,12 @@
 import { describe, expect, it } from 'vitest';
+import type { Demand } from '../src/core/sim/demand.js';
 import { DynamoDbLiveSession, type DynamoDbLiveSettings } from '../src/core/scenario/dynamodb/liveSession.js';
 import { defaultDynamoDbLivePreset, findDynamoDbLivePreset, dynamoDbLivePresets } from '../src/core/scenario/dynamodb/livePresets.js';
 import { PARTITION_MAX_WRITE_UNITS_PER_SEC } from '../src/core/services/dynamodb/limits.js';
 
+const baseLoad: Demand = { readsPerSecond: 0, writesPerSecond: 30_000 };
+
 const baseSettings: DynamoDbLiveSettings = {
-  readsPerSecond: 0,
-  writesPerSecond: 30_000,
   distribution: { kind: 'uniform' },
   keyCount: 500,
   capacity: {
@@ -19,26 +20,20 @@ const baseSettings: DynamoDbLiveSettings = {
   consistentRead: true,
 };
 
-/** `seconds` 秒ぶん進める。フレームは 60fps 相当。 */
-function advanceSeconds(session: DynamoDbLiveSession, seconds: number): void {
-  const frames = Math.ceil(seconds * 60);
-  for (let i = 0; i < frames; i += 1) session.advance(1 / 60);
+const TICK_SECONDS = 0.1;
+
+/**
+ * `seconds` 秒ぶん進める。
+ *
+ * M3 でセッションから時計を取り上げたので、tick は呼ぶ側が刻む
+ * （実機では `TerrariumDriver` の `SimulationClock` がこれをやる）。
+ */
+function advanceSeconds(session: DynamoDbLiveSession, seconds: number, load: Demand = baseLoad): void {
+  const ticks = Math.round(seconds / TICK_SECONDS);
+  for (let i = 0; i < ticks; i += 1) session.step(load, TICK_SECONDS);
 }
 
 describe('DynamoDbLiveSession', () => {
-  it('負荷だけを変えてもテーブルを作り直さない', () => {
-    const session = new DynamoDbLiveSession(baseSettings);
-    advanceSeconds(session, 1);
-    const before = session.table;
-
-    const rebuilt = session.update({ writesPerSecond: 35_000 });
-
-    expect(rebuilt).toBe(false);
-    expect(session.table).toBe(before);
-    // 経過時間もバーストの貯金も維持される（ダイヤルを回しただけなので）。
-    expect(session.snapshot().simulatedSeconds).toBeGreaterThan(0);
-  });
-
   it('テーブルの形が変わる設定はテーブルを作り直す', () => {
     const session = new DynamoDbLiveSession(baseSettings);
     advanceSeconds(session, 1);
@@ -68,8 +63,6 @@ describe('DynamoDbLiveSession', () => {
       },
       keyCount: 500,
       distribution: { kind: 'uniform' },
-      writesPerSecond: 30_000,
-      readsPerSecond: 0,
     };
 
     expect(session.replace(reordered)).toBe(false);
@@ -87,11 +80,11 @@ describe('DynamoDbLiveSession', () => {
     if (bigItem === undefined || zipf === undefined) return;
 
     const direct = new DynamoDbLiveSession(zipf.settings);
-    advanceSeconds(direct, 60);
+    advanceSeconds(direct, 60, zipf.load);
 
     const viaBigItem = new DynamoDbLiveSession(bigItem.settings);
     viaBigItem.replace(zipf.settings);
-    advanceSeconds(viaBigItem, 60);
+    advanceSeconds(viaBigItem, 60, zipf.load);
 
     expect(viaBigItem.settings.initialBurstTokens).toBeUndefined();
     expect(viaBigItem.snapshot().write.hottest?.burstRatio).toBeCloseTo(
@@ -144,13 +137,13 @@ describe('DynamoDbLiveSession', () => {
 
     const session = new DynamoDbLiveSession(preset.settings);
 
-    advanceSeconds(session, 60);
+    advanceSeconds(session, 60, preset.load);
     const early = session.snapshot().write.hottest;
     expect(early?.throttleRate).toBe(0); // 何も起きていないように見える
     expect(early?.burstRatio).toBeLessThan(1); // が、貯金は既に減っている
     expect(early?.burstDrawUnitsPerSec).toBeGreaterThan(0);
 
-    advanceSeconds(session, 540);
+    advanceSeconds(session, 540, preset.load);
     const later = session.snapshot().write.hottest;
     expect(later?.burstRatio).toBeLessThan(early?.burstRatio ?? 1);
     expect(later?.throttleRate).toBeGreaterThan(0); // 貯金が尽きた瞬間に壊れる
@@ -166,8 +159,8 @@ describe('DynamoDbLiveSession', () => {
     const off = new DynamoDbLiveSession(zipf.settings);
     const on = new DynamoDbLiveSession(zipfAdaptive.settings);
     // バーストの貯金が尽きるまで進めないと差が出ない (M1 の発見)。
-    advanceSeconds(off, 400);
-    advanceSeconds(on, 400);
+    advanceSeconds(off, 400, zipf.load);
+    advanceSeconds(on, 400, zipfAdaptive.load);
 
     const offHot = off.snapshot().write.hottest;
     const onHot = on.snapshot().write.hottest;
@@ -200,7 +193,7 @@ describe('dynamoDbLivePresets', () => {
   it('どのプリセットもそのままセッションを構築して進められる', () => {
     for (const preset of dynamoDbLivePresets) {
       const session = new DynamoDbLiveSession(preset.settings);
-      advanceSeconds(session, 2);
+      advanceSeconds(session, 2, preset.load);
       const snapshot = session.snapshot();
       expect(snapshot.partitionCount).toBeGreaterThan(0);
       expect(snapshot[preset.focusLane].demandedRequestsPerSec).toBeGreaterThan(0);
@@ -213,7 +206,7 @@ describe('dynamoDbLivePresets', () => {
     if (preset === undefined) return;
 
     const session = new DynamoDbLiveSession(preset.settings);
-    advanceSeconds(session, 5);
+    advanceSeconds(session, 5, preset.load);
     const { read } = session.snapshot();
 
     // 3,000 read units/秒 ÷ 5 units (20KB) = 600 req/s。1,200 req/s 流せば半分弾かれる。

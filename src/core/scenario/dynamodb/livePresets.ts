@@ -1,4 +1,5 @@
-import type { LaneKind, DynamoDbLiveSettings } from './liveSession.js';
+import type { Demand, LaneKind } from '../../sim/demand.js';
+import type { DynamoDbLiveSettings } from './liveSession.js';
 import {
   bigItemTrap,
   singleHotKey,
@@ -21,6 +22,19 @@ export interface DynamoDbLivePreset {
   readonly name: string;
   readonly lesson: string;
   readonly settings: DynamoDbLiveSettings;
+  /**
+   * 負荷ダイヤルの初期値。
+   *
+   * ⚠️ `settings` の中ではなく**外**にある。M3 で負荷は 1 本の共有ダイヤルになり、
+   * `TerrariumDriver` が持つようになったため。
+   * この分かれ目はそのまま「テーブルの形（作り直しが要る）」と
+   * 「ダイヤル（回すだけ）」の境界にもなっている。
+   *
+   * なお、このプリセットを読み込むと Aurora 側にも同じ負荷が流れる。
+   * DynamoDB 向けに選んだ数字なので Aurora は瞬時に飽和するが、
+   * それ自体が「同じ負荷なのに壊れ方が違う」という M3 の見どころになる。
+   */
+  readonly load: Demand;
   /** このプリセットで見るべきレーン。`bigItemTrap` だけが読み取りの話。 */
   readonly focusLane: LaneKind;
 }
@@ -36,7 +50,6 @@ const sharedTable = {
   tableSizeGb: 10,
   itemSizeKb: 1,
   consistentRead: true,
-  readsPerSecond: 0,
 } as const;
 
 const zipfCapacity = {
@@ -51,21 +64,21 @@ const zipfTable = {
   tableSizeGb: 500,
   itemSizeKb: 1,
   consistentRead: true,
-  readsPerSecond: 0,
   distribution: { kind: 'zipf', skew: 0.7 },
-  writesPerSecond: 12_000,
 } as const;
+
+const zipfLoad: Demand = { readsPerSecond: 0, writesPerSecond: 12_000 };
 
 /** 起動時に読み込むプリセット。まず健全な状態を見せてから壊しにいく。 */
 export const defaultDynamoDbLivePreset: DynamoDbLivePreset = {
   name: uniformHealthy.name,
   lesson: uniformHealthy.lesson,
   focusLane: 'write',
+  load: { readsPerSecond: 0, writesPerSecond: 24_000 },
   settings: {
     ...sharedTable,
     capacity: { ...sharedCapacity, adaptiveCapacity: true },
     distribution: { kind: 'uniform' },
-    writesPerSecond: 24_000,
   },
 };
 
@@ -75,51 +88,55 @@ export const dynamoDbLivePresets: readonly DynamoDbLivePreset[] = [
     name: uniformAtFullCapacity.name,
     lesson: uniformAtFullCapacity.lesson,
     focusLane: 'write',
+    load: { readsPerSecond: 0, writesPerSecond: 40_000 },
     settings: {
       ...sharedTable,
       capacity: { ...sharedCapacity, adaptiveCapacity: true },
       distribution: { kind: 'uniform' },
-      writesPerSecond: 40_000,
     },
   },
   {
     name: singleHotKey.name,
     lesson: singleHotKey.lesson,
     focusLane: 'write',
+    load: { readsPerSecond: 0, writesPerSecond: 30_000 },
     settings: {
       ...sharedTable,
       capacity: { ...sharedCapacity, adaptiveCapacity: true },
       distribution: { kind: 'singleHot', hotRatio: 0.9 },
-      writesPerSecond: 30_000,
     },
   },
   {
     name: singleHotKeyWithoutAdaptive.name,
     lesson: singleHotKeyWithoutAdaptive.lesson,
     focusLane: 'write',
+    load: { readsPerSecond: 0, writesPerSecond: 30_000 },
     settings: {
       ...sharedTable,
       capacity: { ...sharedCapacity, adaptiveCapacity: false },
       distribution: { kind: 'singleHot', hotRatio: 0.9 },
-      writesPerSecond: 30_000,
     },
   },
   {
     name: zipfWithoutAdaptive.name,
     lesson: zipfWithoutAdaptive.lesson,
     focusLane: 'write',
+    load: zipfLoad,
     settings: { ...zipfTable, capacity: { ...zipfCapacity, adaptiveCapacity: false } },
   },
   {
     name: zipfWithAdaptive.name,
     lesson: zipfWithAdaptive.lesson,
     focusLane: 'write',
+    load: zipfLoad,
     settings: { ...zipfTable, capacity: { ...zipfCapacity, adaptiveCapacity: true } },
   },
   {
     name: bigItemTrap.name,
     lesson: bigItemTrap.lesson,
     focusLane: 'read',
+    // 壁は 600 req/s。その倍から始めて、ダイヤルを下げると壁の位置が分かる。
+    load: { readsPerSecond: 1_200, writesPerSecond: 0 },
     settings: {
       keyCount: 500,
       // provisioned で WCU 0 は実在しない設定なので on-demand を使う (M1 の判断を踏襲)。
@@ -128,9 +145,6 @@ export const dynamoDbLivePresets: readonly DynamoDbLivePreset[] = [
       itemSizeKb: 20,
       consistentRead: true,
       distribution: { kind: 'uniform' },
-      // 壁は 600 req/s。その倍から始めて、ダイヤルを下げると壁の位置が分かる。
-      readsPerSecond: 1_200,
-      writesPerSecond: 0,
       // 貯金ゼロから始める。バーストがあると壁に当たる瞬間がぼやけるため。
       initialBurstTokens: 0,
     },
