@@ -1,7 +1,7 @@
 import type { JSX } from 'react';
 import { OrbitControls } from '@react-three/drei';
 import { Canvas } from '@react-three/fiber';
-import type { LaneKind, DynamoDbLiveSession } from '../../core/scenario/dynamoDbLiveSession.js';
+import type { LaneKind, DynamoDbLiveSession } from '../../core/scenario/dynamodb/liveSession.js';
 import { HEIGHT_AT_HARD_CAP, gridExtent } from '../layout.js';
 import { PartitionColumns } from './PartitionColumns.js';
 import { RequestParticles } from './RequestParticles.js';

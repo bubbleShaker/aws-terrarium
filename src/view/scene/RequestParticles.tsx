@@ -2,7 +2,7 @@ import { useFrame } from '@react-three/fiber';
 import { useMemo, useRef } from 'react';
 import type { JSX } from 'react';
 import type { BufferAttribute, Points } from 'three';
-import type { LaneKind, DynamoDbLiveSession } from '../../core/scenario/dynamoDbLiveSession.js';
+import type { LaneKind, DynamoDbLiveSession } from '../../core/scenario/dynamodb/liveSession.js';
 import { allocateByWeight } from '../../core/sim/particleSampling.js';
 import { Rng } from '../../core/sim/rng.js';
 import { partitionThrottleRate } from '../../core/services/dynamodb/partitionMetrics.js';

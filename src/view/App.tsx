@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import type { JSX } from 'react';
-import { DynamoDbLiveSession, type LaneKind, type DynamoDbLiveSettings } from '../core/scenario/dynamoDbLiveSession.js';
-import { type LivePreset, defaultLivePreset } from '../core/scenario/livePresets.js';
+import { DynamoDbLiveSession, type LaneKind, type DynamoDbLiveSettings } from '../core/scenario/dynamodb/liveSession.js';
+import { type DynamoDbLivePreset, defaultDynamoDbLivePreset } from '../core/scenario/dynamodb/livePresets.js';
 import { TerrariumScene } from './scene/TerrariumScene.js';
 import { ControlPanel } from './ui/ControlPanel.js';
 import { StatusHud } from './ui/StatusHud.js';
@@ -16,11 +16,11 @@ import { useSimulationDriver } from './useSimulationDriver.js';
  */
 export function App(): JSX.Element {
   // useMemo はキャッシュを捨てることが許されている。シミュレーション本体の保持先には使えない。
-  const [session] = useState(() => new DynamoDbLiveSession(defaultLivePreset.settings));
-  const [settings, setSettings] = useState<DynamoDbLiveSettings>(defaultLivePreset.settings);
-  const [presetName, setPresetName] = useState(defaultLivePreset.name);
-  const [lesson, setLesson] = useState(defaultLivePreset.lesson);
-  const [lane, setLane] = useState<LaneKind>(defaultLivePreset.focusLane);
+  const [session] = useState(() => new DynamoDbLiveSession(defaultDynamoDbLivePreset.settings));
+  const [settings, setSettings] = useState<DynamoDbLiveSettings>(defaultDynamoDbLivePreset.settings);
+  const [presetName, setPresetName] = useState(defaultDynamoDbLivePreset.name);
+  const [lesson, setLesson] = useState(defaultDynamoDbLivePreset.lesson);
+  const [lane, setLane] = useState<LaneKind>(defaultDynamoDbLivePreset.focusLane);
   const [timeScale, setTimeScale] = useState(1);
 
   const snapshot = useSimulationDriver(session);
@@ -41,7 +41,7 @@ export function App(): JSX.Element {
   );
 
   const handleLoadPreset = useCallback(
-    (preset: LivePreset) => {
+    (preset: DynamoDbLivePreset) => {
       session.replace(preset.settings);
       // 設定の出所は session に一本化する。preset.settings をそのまま入れると、
       // 省略可能なフィールドの扱いが session 側とずれる。

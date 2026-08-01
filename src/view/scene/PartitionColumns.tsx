@@ -2,7 +2,7 @@ import { useFrame } from '@react-three/fiber';
 import { useMemo, useRef } from 'react';
 import type { JSX } from 'react';
 import { Color, type InstancedMesh, type Mesh, Object3D } from 'three';
-import type { LaneKind, DynamoDbLiveSession } from '../../core/scenario/dynamoDbLiveSession.js';
+import type { LaneKind, DynamoDbLiveSession } from '../../core/scenario/dynamodb/liveSession.js';
 import {
   partitionBurstRatio,
   partitionThrottleRate,

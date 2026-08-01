@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import type { JSX, ReactNode } from 'react';
-import type { LaneKind, DynamoDbLiveSettings } from '../../core/scenario/dynamoDbLiveSession.js';
-import { type LivePreset, livePresets } from '../../core/scenario/livePresets.js';
+import type { LaneKind, DynamoDbLiveSettings } from '../../core/scenario/dynamodb/liveSession.js';
+import { type DynamoDbLivePreset, dynamoDbLivePresets } from '../../core/scenario/dynamodb/livePresets.js';
 import type { KeyDistributionSpec } from '../../core/services/dynamodb/keyDistribution.js';
 
 interface ControlPanelProps {
@@ -10,7 +10,7 @@ interface ControlPanelProps {
   readonly presetName: string;
   readonly timeScale: number;
   readonly onChange: (patch: Partial<DynamoDbLiveSettings>) => void;
-  readonly onLoadPreset: (preset: LivePreset) => void;
+  readonly onLoadPreset: (preset: DynamoDbLivePreset) => void;
   readonly onLaneChange: (lane: LaneKind) => void;
   readonly onTimeScaleChange: (scale: number) => void;
 }
@@ -154,7 +154,7 @@ export function ControlPanel({
       <section className="control">
         <span className="control__label">プリセット（M1 のシナリオ）</span>
         <div className="chips">
-          {livePresets.map((preset) => (
+          {dynamoDbLivePresets.map((preset) => (
             <Chip
               key={preset.name}
               on={preset.name === presetName}

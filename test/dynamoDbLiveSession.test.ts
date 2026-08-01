@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { DynamoDbLiveSession, type DynamoDbLiveSettings } from '../src/core/scenario/dynamoDbLiveSession.js';
-import { defaultLivePreset, findLivePreset, livePresets } from '../src/core/scenario/livePresets.js';
+import { DynamoDbLiveSession, type DynamoDbLiveSettings } from '../src/core/scenario/dynamodb/liveSession.js';
+import { defaultDynamoDbLivePreset, findDynamoDbLivePreset, dynamoDbLivePresets } from '../src/core/scenario/dynamodb/livePresets.js';
 import { PARTITION_MAX_WRITE_UNITS_PER_SEC } from '../src/core/services/dynamodb/limits.js';
 
 const baseSettings: DynamoDbLiveSettings = {
@@ -80,8 +80,8 @@ describe('DynamoDbLiveSession', () => {
     // `big-item-trap` だけが initialBurstTokens: 0 を持つ。
     // replace がマージだと、そのあと他のプリセットを選んでも 0 が残り、
     // 「バーストの貯金が尽きるまで障害は表面化しない」という教材の山場が消える。
-    const bigItem = findLivePreset('big-item-trap');
-    const zipf = findLivePreset('zipf-without-adaptive');
+    const bigItem = findDynamoDbLivePreset('big-item-trap');
+    const zipf = findDynamoDbLivePreset('zipf-without-adaptive');
     expect(bigItem).toBeDefined();
     expect(zipf).toBeDefined();
     if (bigItem === undefined || zipf === undefined) return;
@@ -138,7 +138,7 @@ describe('DynamoDbLiveSession', () => {
   it('バーストの貯金が尽きるまでスロットルは表面化しない（急に壊れる理由が見える）', () => {
     // M1 の発見 2:「バーストキャパシティが障害を数分間隠す」。
     // 貯金が目に見えないと、View 上で「なぜ急に壊れたのか」が分からない。
-    const preset = findLivePreset('zipf-without-adaptive');
+    const preset = findDynamoDbLivePreset('zipf-without-adaptive');
     expect(preset).toBeDefined();
     if (preset === undefined) return;
 
@@ -157,8 +157,8 @@ describe('DynamoDbLiveSession', () => {
   });
 
   it('アダプティブの ON/OFF で受理量が変わる（赤熱の指標そのものは変わらない）', () => {
-    const zipf = findLivePreset('zipf-without-adaptive');
-    const zipfAdaptive = findLivePreset('zipf-with-adaptive');
+    const zipf = findDynamoDbLivePreset('zipf-without-adaptive');
+    const zipfAdaptive = findDynamoDbLivePreset('zipf-with-adaptive');
     expect(zipf).toBeDefined();
     expect(zipfAdaptive).toBeDefined();
     if (zipf === undefined || zipfAdaptive === undefined) return;
@@ -183,9 +183,9 @@ describe('DynamoDbLiveSession', () => {
   });
 });
 
-describe('livePresets', () => {
+describe('dynamoDbLivePresets', () => {
   it('M1 のシナリオ名と 1 対 1 に対応している', () => {
-    expect(livePresets.map((p) => p.name)).toEqual([
+    expect(dynamoDbLivePresets.map((p) => p.name)).toEqual([
       'uniform-healthy',
       'uniform-at-full-capacity',
       'single-hot-key',
@@ -194,11 +194,11 @@ describe('livePresets', () => {
       'zipf-with-adaptive',
       'big-item-trap',
     ]);
-    expect(livePresets[0]).toBe(defaultLivePreset);
+    expect(dynamoDbLivePresets[0]).toBe(defaultDynamoDbLivePreset);
   });
 
   it('どのプリセットもそのままセッションを構築して進められる', () => {
-    for (const preset of livePresets) {
+    for (const preset of dynamoDbLivePresets) {
       const session = new DynamoDbLiveSession(preset.settings);
       advanceSeconds(session, 2);
       const snapshot = session.snapshot();
@@ -208,7 +208,7 @@ describe('livePresets', () => {
   });
 
   it('big-item-trap は 20KB 項目で 600 req/s の壁に当たる', () => {
-    const preset = findLivePreset('big-item-trap');
+    const preset = findDynamoDbLivePreset('big-item-trap');
     expect(preset).toBeDefined();
     if (preset === undefined) return;
 

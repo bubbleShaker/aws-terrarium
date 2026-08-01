@@ -1,4 +1,4 @@
-import type { LaneKind, DynamoDbLiveSettings } from './dynamoDbLiveSession.js';
+import type { LaneKind, DynamoDbLiveSettings } from './liveSession.js';
 import {
   bigItemTrap,
   singleHotKey,
@@ -17,7 +17,7 @@ import {
  * 借りていないのは負荷だけで、これはバッチ用の `LoadProfile` (時間の関数) を
  * ダイヤルの初期値 (その瞬間の値) に読み替える必要があるため。
  */
-export interface LivePreset {
+export interface DynamoDbLivePreset {
   readonly name: string;
   readonly lesson: string;
   readonly settings: DynamoDbLiveSettings;
@@ -57,7 +57,7 @@ const zipfTable = {
 } as const;
 
 /** 起動時に読み込むプリセット。まず健全な状態を見せてから壊しにいく。 */
-export const defaultLivePreset: LivePreset = {
+export const defaultDynamoDbLivePreset: DynamoDbLivePreset = {
   name: uniformHealthy.name,
   lesson: uniformHealthy.lesson,
   focusLane: 'write',
@@ -69,8 +69,8 @@ export const defaultLivePreset: LivePreset = {
   },
 };
 
-export const livePresets: readonly LivePreset[] = [
-  defaultLivePreset,
+export const dynamoDbLivePresets: readonly DynamoDbLivePreset[] = [
+  defaultDynamoDbLivePreset,
   {
     name: uniformAtFullCapacity.name,
     lesson: uniformAtFullCapacity.lesson,
@@ -137,6 +137,6 @@ export const livePresets: readonly LivePreset[] = [
   },
 ];
 
-export function findLivePreset(name: string): LivePreset | undefined {
-  return livePresets.find((preset) => preset.name === name);
+export function findDynamoDbLivePreset(name: string): DynamoDbLivePreset | undefined {
+  return dynamoDbLivePresets.find((preset) => preset.name === name);
 }
