@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
-  MAX_STATISTICAL_UTILIZATION,
+  ERLANG_C_MAX_UTILIZATION,
   erlangCWaitSeconds,
 } from '../src/core/services/aurora/erlangC.js';
 
@@ -68,7 +68,7 @@ describe('Erlang C（レイテンシの統計項）', () => {
 
   it('ρ は 0.99 でクランプされ、過負荷でも有限に留まる', () => {
     // ⚠️ ここが壊れると過負荷域の数字が全部壊れる。1/(1−ρ) は ρ→1 で発散する。
-    const clamped = erlangCWaitSeconds(vcpu, mu, capacity * MAX_STATISTICAL_UTILIZATION);
+    const clamped = erlangCWaitSeconds(vcpu, mu, capacity * ERLANG_C_MAX_UTILIZATION);
     for (const rho of [1.0, 1.05, 2, 10, 1_000]) {
       const wait = erlangCWaitSeconds(vcpu, mu, capacity * rho);
       expect(Number.isFinite(wait)).toBe(true);

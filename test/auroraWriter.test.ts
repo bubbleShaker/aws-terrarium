@@ -22,8 +22,23 @@ import {
 // db.r6g.large: vCPU 2 / max_connections 1,000 / 1 クエリ 5ms
 // → μ = 200 q/s/core、総容量 400 q/s。DynamoDB 側と桁を揃えてある。
 const VCPU = 2;
+const SERVICE_RATE = 200;
 const MAX_CONNECTIONS = 1_000;
 const CAPACITY = 400;
+
+/**
+ * ⚠️ このファイルが固定している看板の数値（定常 Q = 960 / 最初のエラーまで 48 秒）は
+ * **dt に依存する離散化の産物**である。tick 末の Q は「上限 − 容量×dt」で頭打ちになるため:
+ *
+ * | dt | 定常 Q | 最初のエラーまで |
+ * |---|---|---|
+ * | 0.1 | 960 | 48.0 秒 |
+ * | 0.5 | 800 | 40 秒 |
+ * | 1.0 | 600 | 30 秒 |
+ *
+ * `SimulationClock` の固定タイムステップが 0.1 秒なので現状は整合しているが、
+ * それを変えるとここの数値がまとめてズレる。research の実測値も dt=0.1 前提。
+ */
 const DT = 0.1;
 
 function build(retry?: AuroraRetryPolicy): AuroraWriter {
@@ -58,6 +73,24 @@ describe('AuroraWriter の諸元', () => {
     // 並ぶ場所が、捌ける本数の 500 倍広い。これが「静かに遅くなる」の正体。
     expect(writer.maxConnections / writer.maxVcpu).toBe(500);
   });
+
+  it('未知のインスタンスクラスは例外で弾く（プロトタイプ由来の名前も含めて）', () => {
+    // `in` で書くと 'constructor' 等が Object.prototype 経由で素通りし、
+    // 諸元が undefined のまま NaN が View まで流れる。例外より遥かに追いにくい壊れ方になる。
+    for (const bad of ['constructor', 'toString', 'valueOf', 'db.r6g.medium', '']) {
+      expect(() => new AuroraWriter({ instanceClass: bad as never })).toThrow(RangeError);
+    }
+  });
+
+  it('壊れた需要 (NaN) を流しても、行列が恒久的に汚染されない', () => {
+    // Q は tick をまたぐ状態なので、一度 NaN が入ると以降ずっと復帰できなくなる。
+    const writer = build();
+    writer.step({ readsPerSecond: Number.NaN, writesPerSecond: Number.NaN }, DT);
+    expect(writer.queueLength).toBe(0);
+
+    const tick = last(run(writer, CAPACITY * 0.9, 60));
+    expect(tick.waitSeconds * 1_000).toBeCloseTo(21.3, 1);
+  });
 });
 
 describe('ρ<1 の定常状態は Erlang C の理論値と一致する', () => {
@@ -70,7 +103,9 @@ describe('ρ<1 の定常状態は Erlang C の理論値と一致する', () => {
     expect(tick.backpressureSeconds).toBeCloseTo(0, 9);
 
     // 待ち時間は統計項が丸ごと担当する。
-    expect(tick.waitSeconds).toBeCloseTo(erlangCWaitSeconds(VCPU, 200, lambda), 12);
+    // ここは実装と同じ関数を呼んでいるので「配線が正しいか」の検査。
+    // 式そのものが正しいかは test/auroraErlangC.test.ts が独立な式で見ている。
+    expect(tick.waitSeconds).toBeCloseTo(erlangCWaitSeconds(VCPU, SERVICE_RATE, lambda), 12);
     // 拒否は 1 件も出ず、需要はすべて捌ける。
     expect(tick.rejectedRequestsPerSec).toBe(0);
     expect(tick.servedRequestsPerSec).toBeCloseTo(lambda, 9);
@@ -92,8 +127,11 @@ describe('ρ<1 の定常状態は Erlang C の理論値と一致する', () => {
 });
 
 describe('Little の法則 L = λW', () => {
-  // L は λW から逆算していない（行列長・統計項・稼働中の 3 つを状態から足している）ので、
-  // これは恒真式ではなく本物の検査になる。どれか 1 項を取り違えると落ちる。
+  // ⚠️ この不変条件は更新式の形から**代数的に必ず成立する**
+  // （tick 末は「Q=0」か「throughput=総容量」のどちらかにしかならないため）。
+  // したがってこれはモデルの検証ではなく、
+  // **L の 3 項（行列長・統計項・稼働中）のどれかを取り違えた場合の回帰ガード**である。
+  // 本物の検証は下の「閉形式と突き合わせる」テストが担う。
   const phases = [
     { lambda: 0, seconds: 5 }, // 無負荷
     { lambda: CAPACITY * 0.5, seconds: 30 }, // 余裕
@@ -114,7 +152,32 @@ describe('Little の法則 L = λW', () => {
         checked += 1;
       }
     }
-    expect(checked).toBe(1_850);
+    expect(checked).toBe(phases.reduce((total, phase) => total + phase.seconds / DT, 0));
+  });
+
+  it('ρ<1 の L が M/M/c の閉形式と一致する（こちらが本物の検証）', () => {
+    // L = a + Lq = λ/μ + C(c,a)·ρ/(1−ρ)。
+    // 実装が使っている Erlang B の漸化式ではなく、教科書の階乗の直接形で書き下す。
+    // 実装と独立な経路なので、「同じ間違いを 2 回する」を避けられる。
+    function textbookActiveSessions(lambda: number): number {
+      const a = lambda / SERVICE_RATE;
+      const rho = a / VCPU;
+      let factorial = 1;
+      let sum = 0;
+      for (let k = 0; k < VCPU; k += 1) {
+        if (k > 0) factorial *= k;
+        sum += a ** k / factorial;
+      }
+      const tail = a ** VCPU / (factorial * VCPU * (1 - rho));
+      const probabilityOfWaiting = tail / (sum + tail);
+      return a + (probabilityOfWaiting * rho) / (1 - rho);
+    }
+
+    for (const rho of [0.5, 0.7, 0.8, 0.9, 0.95, 0.98]) {
+      const lambda = CAPACITY * rho;
+      const tick = last(run(build(), lambda, 120));
+      expect(tick.activeSessions).toBeCloseTo(textbookActiveSessions(lambda), 9);
+    }
   });
 
   it('AAS が Max vCPU 線を超えるのは、行列ができたときだけ', () => {
@@ -179,7 +242,10 @@ describe('壁は 2 枚あり、性質が違う', () => {
 
   it('壁B (max_connections) は待合室が埋まってから拒否する', () => {
     const tick = last(run(build(), CAPACITY * 1.25, 300));
-    expect(tick.connectionUtilization).toBeGreaterThan(0.95);
+    // 占有率は受付直後のピーク基準。拒否が出ているなら必ず 1（満杯）になっている。
+    // tick 末の queueLength は容量ぶん捌けた後なので 960、つまり 0.96 にしかならない。
+    expect(tick.connectionUtilization).toBeCloseTo(1, 9);
+    expect(tick.queueLength / MAX_CONNECTIONS).toBeCloseTo(0.96, 9);
     expect(tick.rejectedRequestsPerSec).toBeGreaterThan(0);
     // 待合室が広がっても捌ける量は 1 件も増えない。上限は性能ではなく待合室の広さ。
     expect(tick.servedRequestsPerSec).toBeCloseTo(CAPACITY, 9);

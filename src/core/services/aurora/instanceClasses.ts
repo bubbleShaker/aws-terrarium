@@ -35,14 +35,16 @@ export interface AuroraInstanceSpec {
  * 窓口は 2 → 32 と 16 倍になる。「メモリを増やす」より「vCPU を増やす」が効くのは
  * この表の形からそのまま読める。
  */
-export const AURORA_INSTANCE_CLASSES = {
+// 凍結するのは「公式表の値なので動かさない」を実行時にも担保するため。
+// ここが書き換わると教材が静かに誤情報を流し始める。
+export const AURORA_INSTANCE_CLASSES = Object.freeze({
   'db.t3.medium': { vcpu: 2, memoryGib: 4, maxConnections: 90 },
   'db.r6g.large': { vcpu: 2, memoryGib: 16, maxConnections: 1_000 },
   'db.r6g.xlarge': { vcpu: 4, memoryGib: 32, maxConnections: 2_000 },
   'db.r6g.2xlarge': { vcpu: 8, memoryGib: 64, maxConnections: 3_000 },
   'db.r6g.4xlarge': { vcpu: 16, memoryGib: 128, maxConnections: 4_000 },
   'db.r6g.8xlarge': { vcpu: 32, memoryGib: 256, maxConnections: 5_000 },
-} as const satisfies Record<string, AuroraInstanceSpec>;
+} as const satisfies Record<string, AuroraInstanceSpec>);
 
 export type AuroraInstanceClass = keyof typeof AURORA_INSTANCE_CLASSES;
 
@@ -64,4 +66,4 @@ export function auroraInstanceSpec(instanceClass: AuroraInstanceClass): AuroraIn
  * 5ms は db.r6g.large (vCPU 2) で総容量 400 q/s になる値で、
  * DynamoDB 側と桁を揃えて並置しやすくするために選んだ。
  */
-export const DEFAULT_SERVICE_TIME_MS = 5;
+export const AURORA_DEFAULT_SERVICE_TIME_MS = 5;

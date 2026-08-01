@@ -4,7 +4,7 @@ import {
   AURORA_INSTANCE_CLASSES,
   type AuroraInstanceClass,
   type AuroraInstanceSpec,
-  DEFAULT_SERVICE_TIME_MS,
+  AURORA_DEFAULT_SERVICE_TIME_MS,
   auroraInstanceSpec,
 } from './instanceClasses.js';
 
@@ -27,10 +27,13 @@ import {
  *
  * 調査 v1 で、再送を「行列長に単純比例」と書いたら出力が **1e151** まで発散した。
  * 再送しうるのは**返事を待っているクライアントだけ**なので、母集団は必ず有限である。
- * このモデルでは二重に蓋をしている:
  *
- * 1. 待っている数は行列長 Q であり、Q ≤ `maxConnections` で構造的に有界
- * 2. さらに `clientPopulation` で明示的に頭打ちにする
+ * 発散を止めているのは `Q ≤ maxConnections` という**構造的な上界**であり、
+ * これによって再送レートは `maxConnections / clientTimeoutSeconds` を超えられない。
+ * `clientPopulation` はそれをさらに絞るダイヤルで、
+ * 抑えるのは**同時に諦めている件数**であってレートそのものではない
+ * （`clientTimeoutSeconds` を極端に短くすれば再送レートはいくらでも上げられる。
+ * ただし有限には留まる）。
  */
 export interface AuroraRetryPolicy {
   /** クライアントが返事を諦めて再送するまでの時間 (秒)。 */
@@ -69,7 +72,13 @@ export interface AuroraWriterTickResult {
 
   /** 待ち行列長 Q。tick をまたいで持続する、このモデル最初の滞留状態。 */
   readonly queueLength: number;
-  /** Q / max_connections。1 に達すると拒否が始まる（＝待合室が埋まった）。 */
+  /**
+   * この tick に待合室が最も埋まった時点の占有率。**1 に達した瞬間から拒否が始まる**。
+   *
+   * 基準にするのは受付直後のピークであって tick 末の `queueLength` ではない。
+   * tick 末は容量ぶん捌けた後なので、`queueLength / maxConnections` は
+   * 拒否が出ていても 1 に届かない（dt=0.1 なら 0.96 で頭打ち）。
+   */
   readonly connectionUtilization: number;
 
   /** 背圧項: いま並んでいる列が掃けるまでの時間 (秒)。過負荷と過渡状態を担当。 */
@@ -113,7 +122,7 @@ export interface AuroraWriterTickResult {
  * 並ぶ場所が捌ける本数の 500 倍広いので、Aurora は
  * **エラーを 1 件も出さないまま、ひたすら遅くなる**ことができる。
  * わずか 5% の過負荷 (ρ=1.05) で、最初のエラーが出るまで **48 秒**かかる。
- * その間にレイテンシは 20 倍に伸びている。
+ * その間にレイテンシはミリ秒から秒へ伸び続けている。
  * エラー率だけ監視していると、この 48 秒は完全に無風に見える。
  *
  * DynamoDB と並べると、これがそのまま教材になる — 同じ 500 q/s を
@@ -160,7 +169,7 @@ export class AuroraWriter {
   #elapsedSeconds = 0;
 
   constructor(config: AuroraWriterConfig) {
-    const serviceTimeMs = config.serviceTimeMs ?? DEFAULT_SERVICE_TIME_MS;
+    const serviceTimeMs = config.serviceTimeMs ?? AURORA_DEFAULT_SERVICE_TIME_MS;
     validateConfig(config, serviceTimeMs);
 
     this.#spec = auroraInstanceSpec(config.instanceClass);
@@ -205,7 +214,11 @@ export class AuroraWriter {
 
     // reader を足していない単一 writer 構成なので、読み取りも writer へ来る。
     // 落とすと「同じ負荷を両方へ流す」という並置の前提が崩れるため、合算して受ける。
-    const demanded = Math.max(0, demand.readsPerSecond) + Math.max(0, demand.writesPerSecond);
+    //
+    // ⚠️ NaN を必ずここで止める。Q は tick をまたいで持続する状態なので、
+    // 一度でも NaN が混じると以降どんな正常な入力を流しても復帰しない
+    // （各 tick が独立している DynamoDB 側とは被害の質が違う）。
+    const demanded = finiteNonNegative(demand.readsPerSecond) + finiteNonNegative(demand.writesPerSecond);
     const retried = this.#retryRatePerSec();
     const offered = demanded + retried;
 
@@ -215,6 +228,8 @@ export class AuroraWriter {
     const admitted = Math.min(inflow, room);
     const rejected = inflow - admitted;
     this.#queue += admitted;
+    // 受付直後がこの tick の待合室のピーク。ここが満杯になった瞬間から拒否が始まる。
+    const peakQueue = this.#queue;
 
     // ── 壁A: vCPU 本数。拒否はせず、捌ける本数だけ捌く ──
     const served = Math.min(this.#queue, this.#capacityPerSec * dtSeconds);
@@ -225,7 +240,10 @@ export class AuroraWriter {
     const throughput = served / dtSeconds;
 
     // ── レイテンシは 2 項の和 ──
-    // 担当する領域が重ならない（一方が効くとき他方はほぼ 0）ので、単純な和で繋いでよい。
+    // ρ<1 では背圧項が 0 になり統計項だけが効く。ρ≥1 では背圧項が主役になる。
+    // ただし ρ≥1 でも統計項が消えるわけではない: クランプ値に張り付いて一定の下駄になる
+    // （ρ=∞ でも 246ms。看板の 2,646ms のうち 9% はこの下駄）。
+    // ⚠️ したがって ERLANG_C_MAX_UTILIZATION は過負荷域の数値に直接効く。動かすと看板の値がズレる。
     const backpressureSeconds = this.#queue / this.#capacityPerSec;
     const statisticalSeconds = erlangCWaitSeconds(
       this.#spec.vcpu,
@@ -235,9 +253,11 @@ export class AuroraWriter {
     const waitSeconds = backpressureSeconds + statisticalSeconds;
     const latencySeconds = waitSeconds + this.#serviceTimeSeconds;
 
-    // L を λW から逆算せず、**状態から独立に組み立てる**。
-    // こうしておくと Little の法則 L = λW がテストとして意味を持つ
-    // （λW で定義してしまうと恒真式になり、何も検証できない）。
+    // L を λW から逆算せず、**状態から独立に組み立てる**（λW で定義すると恒真式になる）。
+    // なお更新式の形から `L ≡ λW` は到達可能な全状態で代数的に成立する
+    // （tick 末は必ず「Q=0」か「throughput=総容量」のどちらかになるため）。
+    // つまりテスト側の全 tick 検査は、モデルの検証ではなく **3 項のどれかを取り違えた場合の回帰ガード**。
+    // 本当の検証は ρ<1 で閉形式 L = a + C·ρ/(1−ρ) と突き合わせる側が担う。
     const activeSessions =
       this.#queue + // 背圧で並んでいる分
       throughput * statisticalSeconds + // ゆらぎで並んでいる分
@@ -255,7 +275,7 @@ export class AuroraWriter {
       rejectedRequestsPerSec: rejected / dtSeconds,
       servedRequestsPerSec: throughput,
       queueLength: this.#queue,
-      connectionUtilization: this.#queue / this.#spec.maxConnections,
+      connectionUtilization: peakQueue / this.#spec.maxConnections,
       backpressureSeconds,
       statisticalSeconds,
       waitSeconds,
@@ -290,8 +310,10 @@ export class AuroraWriter {
 }
 
 function validateConfig(config: AuroraWriterConfig, serviceTimeMs: number): void {
-  if (!(config.instanceClass in AURORA_INSTANCE_CLASSES)) {
-    // 型では塞いであるが、UI やプリセットから文字列で流れ込む経路があるので実行時にも見る。
+  // 型では塞いであるが、UI やプリセットから文字列で流れ込む経路があるので実行時にも見る。
+  // ⚠️ `in` を使ってはいけない。プロトタイプチェーンを歩くので 'constructor' や 'toString' が
+  // 素通りし、諸元が undefined のまま NaN が View まで流れる（例外より遥かに追いにくい壊れ方）。
+  if (!Object.hasOwn(AURORA_INSTANCE_CLASSES, config.instanceClass)) {
     throw new RangeError(`未知のインスタンスクラス: ${config.instanceClass}`);
   }
   requirePositive(serviceTimeMs, 'serviceTimeMs');
@@ -305,4 +327,8 @@ function requirePositive(value: number, name: string): void {
   if (!Number.isFinite(value) || value <= 0) {
     throw new RangeError(`${name} は正の有限数である必要がある: ${value}`);
   }
+}
+
+function finiteNonNegative(value: number): number {
+  return Number.isFinite(value) ? Math.max(0, value) : 0;
 }

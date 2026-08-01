@@ -35,7 +35,7 @@
  * 忘れると過負荷域（ρ≥1）の数字が全部壊れる。
  * ρ≥1 の領域を担当するのは統計項ではなく背圧項なので、ここは頭打ちで構わない。
  */
-export const MAX_STATISTICAL_UTILIZATION = 0.99;
+export const ERLANG_C_MAX_UTILIZATION = 0.99;
 
 /**
  * M/M/c の平均待ち時間 Wq (秒)。サービス時間そのものは含まない。
@@ -85,5 +85,5 @@ function erlangBProbability(servers: number, offeredLoad: number): number {
 
 function clampUtilization(utilization: number): number {
   if (!Number.isFinite(utilization) || utilization <= 0) return 0;
-  return Math.min(utilization, MAX_STATISTICAL_UTILIZATION);
+  return Math.min(utilization, ERLANG_C_MAX_UTILIZATION);
 }
