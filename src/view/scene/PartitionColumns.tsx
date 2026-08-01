@@ -2,7 +2,7 @@ import { useFrame } from '@react-three/fiber';
 import { useMemo, useRef } from 'react';
 import type { JSX } from 'react';
 import { Color, type InstancedMesh, type Mesh, Object3D } from 'three';
-import type { LaneKind, LiveSession } from '../../core/scenario/liveSession.js';
+import type { LaneKind, DynamoDbLiveSession } from '../../core/scenario/dynamoDbLiveSession.js';
 import {
   partitionBurstRatio,
   partitionThrottleRate,
@@ -11,7 +11,7 @@ import { ACCEPTED_WIDTH, COLUMN_WIDTH, columnHeight, damp, gridPositions } from 
 import { acceptedColor, heatColor } from '../palette.js';
 
 interface PartitionColumnsProps {
-  readonly session: LiveSession;
+  readonly session: DynamoDbLiveSession;
   readonly lane: LaneKind;
 }
 

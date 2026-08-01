@@ -17,11 +17,11 @@ import { SimulationClock, type SimulationClockConfig } from '../sim/simulationCl
  *
  * `runScenario()` の `Scenario` と分けているのは、用途が違うため:
  * - `Scenario` は「最後まで一気に流して集計する」バッチ用。負荷は時間の関数 (`LoadProfile`)
- * - `LiveSettings` は「人間がダイヤルを回す」用。負荷はその瞬間の値であり、時間の関数ではない
+ * - `DynamoDbLiveSettings` は「人間がダイヤルを回す」用。負荷はその瞬間の値であり、時間の関数ではない
  *
  * 同じ型を無理に共用すると、UI から `LoadProfile` を組み立てる羽目になって歪む。
  */
-export interface LiveSettings {
+export interface DynamoDbLiveSettings {
   /** ダイヤルで動かす負荷。ここだけはテーブルを作り直さずに変えられる。 */
   readonly readsPerSecond: number;
   readonly writesPerSecond: number;
@@ -69,7 +69,7 @@ export interface LaneView {
   readonly hottest: PartitionView | undefined;
 }
 
-export interface SessionSnapshot {
+export interface DynamoDbSessionSnapshot {
   /** 刻んだ仮想時間の合計 (秒)。 */
   readonly simulatedSeconds: number;
   readonly partitionCount: number;
@@ -99,22 +99,22 @@ export interface SessionSnapshot {
  * （設定を変えた瞬間から新しいテーブルが始まる、という素直な解釈）。
  * `generation` が増えるので、View 側はそれを見てリセットに追随できる。
  */
-export class LiveSession {
-  #settings: LiveSettings;
+export class DynamoDbLiveSession {
+  #settings: DynamoDbLiveSettings;
   #table: DynamoDbTable;
   #shapeKey: string;
   #clock: SimulationClock;
   #latest: DynamoDbTickResult | undefined;
   #generation = 0;
 
-  constructor(settings: LiveSettings, clockConfig?: SimulationClockConfig) {
+  constructor(settings: DynamoDbLiveSettings, clockConfig?: SimulationClockConfig) {
     this.#settings = settings;
     this.#shapeKey = tableShapeKey(settings);
     this.#table = buildTable(settings);
     this.#clock = new SimulationClock(clockConfig);
   }
 
-  get settings(): LiveSettings {
+  get settings(): DynamoDbLiveSettings {
     return this.#settings;
   }
 
@@ -140,7 +140,7 @@ export class LiveSession {
    *
    * @returns 作り直したかどうか
    */
-  update(patch: Partial<LiveSettings>): boolean {
+  update(patch: Partial<DynamoDbLiveSettings>): boolean {
     return this.#apply({ ...this.#settings, ...patch });
   }
 
@@ -152,11 +152,11 @@ export class LiveSession {
    * 「`big-item-trap` を見たあとに他のプリセットを選ぶと、
    * バーストの貯金が 0 のまま始まる」という形で教材が壊れる。
    */
-  replace(settings: LiveSettings): boolean {
+  replace(settings: DynamoDbLiveSettings): boolean {
     return this.#apply(settings);
   }
 
-  #apply(next: LiveSettings): boolean {
+  #apply(next: DynamoDbLiveSettings): boolean {
     const nextShapeKey = tableShapeKey(next);
     if (nextShapeKey === this.#shapeKey) {
       // 形が同じなら負荷だけの変更。テーブルは作り直さない。
@@ -201,7 +201,7 @@ export class LiveSession {
    * 毎フレームではなく HUD の更新頻度 (10Hz 程度) で呼ぶことを想定している。
    * 毎フレーム必要な値は `latest` から直接読むこと。
    */
-  snapshot(): SessionSnapshot {
+  snapshot(): DynamoDbSessionSnapshot {
     const { read, write } = this.#table.lanes;
     return {
       simulatedSeconds: this.#clock.simulatedSeconds,
@@ -266,7 +266,7 @@ export class LiveSession {
   }
 }
 
-function buildTable(settings: LiveSettings): DynamoDbTable {
+function buildTable(settings: DynamoDbLiveSettings): DynamoDbTable {
   return new DynamoDbTable({
     capacity: settings.capacity,
     tableSizeGb: settings.tableSizeGb,
@@ -285,7 +285,7 @@ function buildTable(settings: LiveSettings): DynamoDbTable {
  * 「変えたのに反映されない」という気づきにくいバグを生む。
  * 残り全部にしておけば、忘れたときの挙動は「余計に作り直す」（安全側）に倒れる。
  */
-function tableShapeKey(settings: LiveSettings): string {
+function tableShapeKey(settings: DynamoDbLiveSettings): string {
   const { readsPerSecond: _reads, writesPerSecond: _writes, ...shape } = settings;
   return stableStringify(shape);
 }

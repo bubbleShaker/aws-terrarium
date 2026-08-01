@@ -225,9 +225,9 @@ M1 で一番伝えたい「単一キーは分割できない」に直結する�
 ### View から Core を駆動する道具（M2 で用意済み・そのまま使える）
 
 ```ts
-import { LiveSession } from './core/scenario/liveSession.js';
+import { DynamoDbLiveSession } from './core/scenario/dynamoDbLiveSession.js';
 
-const session = new LiveSession(settings);   // 設定を渡してセッションを作る
+const session = new DynamoDbLiveSession(settings); // 設定を渡してセッションを作る
 session.advance(frameDeltaSeconds);          // 固定タイムステップで進む。返り値は刻んだ tick 数
 session.latest;                              // 直近の tick 結果（毎フレーム読む用・生の数値）
 session.snapshot();                          // View 向けに整形した状態（HUD 用・10Hz 程度で読む）
@@ -235,17 +235,25 @@ session.update({ writesPerSecond: 30_000 }); // 設定変更。テーブルの�
 session.clock.timeScale = 20;                // 早送り
 ```
 
-Aurora を足すときは、**この `LiveSession` 相当を Aurora 用にもう 1 つ作る**のが素直。
+Aurora を足すときは、**この `DynamoDbLiveSession` 相当を Aurora 用にもう 1 つ作る**のが素直。
 `DynamoDbTable` と `AuroraWriter` は内部モデルが違いすぎるので、
 無理に共通のインターフェースへ押し込めない（そこは M3 で判断する）。
 
 ### M3 の着手時にやると決めてあること（M2 のレビュー指摘の持ち越し）
 
-- **`LiveSession` を `DynamoDbLiveSession` に改名する。** 名前だけが汎用で、
-  中身は `DynamoDbTable` を直接 new している。Aurora を足す前に名前を実態へ寄せる
-- **`SessionSnapshot` / `PartitionView` を View 層へ移すか検討する。** これは
+- ✅ **`LiveSession` を `DynamoDbLiveSession` に改名する** — 完了。
+  あわせて `LiveSettings` → `DynamoDbLiveSettings`、`SessionSnapshot` → `DynamoDbSessionSnapshot`、
+  ファイルも `dynamoDbLiveSession.ts` へ。`PartitionView` / `LaneView` / `LaneKind` は
+  すでに DynamoDB のドメイン概念を指す名前なので据え置いた
+- ⏭ **`livePresets.ts` にも同じ改名が要る** — 次の一歩。`LivePreset.settings` はすでに
+  `DynamoDbLiveSettings` を持っており、Aurora のプリセットを書いた瞬間に必ずぶつかる。
+  **M3 本体の実装より前**に片付ける
+- **`DynamoDbSessionSnapshot` / `PartitionView` を View 層へ移すか検討する。** これは
   「画面に出したい数字」で変わる presenter であり、Core の他の部分とは変更理由が違う。
-  Aurora と共用しようとすると必ず歪むので、そのタイミングで判断する
+  Aurora と共用しようとすると必ず歪むので、そのタイミングで判断する。
+  **`LaneKind` の置き場所も一緒に考える** — read/write トグルの型として View の 6 ファイルが
+  import しており、Aurora 側が同じトグルを持つと `dynamoDbLiveSession.js` を
+  import する羽目になって依存の向きが不自然になる
 
 ### M3 で気をつけること
 

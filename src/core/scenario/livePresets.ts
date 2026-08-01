@@ -1,4 +1,4 @@
-import type { LaneKind, LiveSettings } from './liveSession.js';
+import type { LaneKind, DynamoDbLiveSettings } from './dynamoDbLiveSession.js';
 import {
   bigItemTrap,
   singleHotKey,
@@ -20,7 +20,7 @@ import {
 export interface LivePreset {
   readonly name: string;
   readonly lesson: string;
-  readonly settings: LiveSettings;
+  readonly settings: DynamoDbLiveSettings;
   /** このプリセットで見るべきレーン。`bigItemTrap` だけが読み取りの話。 */
   readonly focusLane: LaneKind;
 }
