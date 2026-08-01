@@ -225,7 +225,7 @@ M1 で一番伝えたい「単一キーは分割できない」に直結する�
 ### View から Core を駆動する道具（M2 で用意済み・そのまま使える）
 
 ```ts
-import { DynamoDbLiveSession } from './core/scenario/dynamoDbLiveSession.js';
+import { DynamoDbLiveSession } from './core/scenario/dynamodb/liveSession.js';
 
 const session = new DynamoDbLiveSession(settings); // 設定を渡してセッションを作る
 session.advance(frameDeltaSeconds);          // 固定タイムステップで進む。返り値は刻んだ tick 数
@@ -241,19 +241,45 @@ Aurora を足すときは、**この `DynamoDbLiveSession` 相当を Aurora 用�
 
 ### M3 の着手時にやると決めてあること（M2 のレビュー指摘の持ち越し）
 
-- ✅ **`LiveSession` を `DynamoDbLiveSession` に改名する** — 完了。
-  あわせて `LiveSettings` → `DynamoDbLiveSettings`、`SessionSnapshot` → `DynamoDbSessionSnapshot`、
-  ファイルも `dynamoDbLiveSession.ts` へ。`PartitionView` / `LaneView` / `LaneKind` は
-  すでに DynamoDB のドメイン概念を指す名前なので据え置いた
-- ⏭ **`livePresets.ts` にも同じ改名が要る** — 次の一歩。`LivePreset.settings` はすでに
-  `DynamoDbLiveSettings` を持っており、Aurora のプリセットを書いた瞬間に必ずぶつかる。
-  **M3 本体の実装より前**に片付ける
+- ✅ **`LiveSession` を `DynamoDbLiveSession` に改名する** — 完了（#9 / PR #11）。
+  あわせて `LiveSettings` → `DynamoDbLiveSettings`、`SessionSnapshot` → `DynamoDbSessionSnapshot`。
+  `PartitionView` / `LaneView` / `LaneKind` はすでに DynamoDB のドメイン概念を指す名前なので据え置いた
+- ✅ **scenario 層を `dynamodb/` 名前空間へ移す** — 完了（#12）。下記「Core の構成」参照
 - **`DynamoDbSessionSnapshot` / `PartitionView` を View 層へ移すか検討する。** これは
   「画面に出したい数字」で変わる presenter であり、Core の他の部分とは変更理由が違う。
   Aurora と共用しようとすると必ず歪むので、そのタイミングで判断する。
   **`LaneKind` の置き場所も一緒に考える** — read/write トグルの型として View の 6 ファイルが
-  import しており、Aurora 側が同じトグルを持つと `dynamoDbLiveSession.js` を
+  import しており、Aurora 側が同じトグルを持つと `dynamodb/liveSession.js` を
   import する羽目になって依存の向きが不自然になる
+
+### Core の構成（Aurora はここへ足す）
+
+```
+src/core/
+├── sim/                  ← サービス非依存の土台。Aurora もそのまま使う
+│   ├── rng.ts  tokenBucket.ts  simulationClock.ts  loadProfile.ts  particleSampling.ts
+├── services/
+│   ├── dynamodb/         table.ts / partitioning.ts / keyDistribution.ts …
+│   └── aurora/           ← M3 で新設。writer.ts（待ち行列モデル本体）
+└── scenario/
+    ├── dynamodb/         liveSession.ts / livePresets.ts / presets.ts / runScenario.ts
+    └── aurora/           ← M3 で新設。liveSession.ts / livePresets.ts
+```
+
+**ディレクトリが名前空間を担う**ので、ファイル名に接頭辞は付けない
+（`scenario/dynamodb/liveSession.ts`。`dynamoDbLiveSession.ts` ではない）。
+
+一方、**export する識別子には接頭辞を付ける** — View 層は 1 画面に両サービスを並べるため、
+同じファイルが両者を import する。`services/dynamodb/table.ts` が `DynamoDbTable` を
+export しているのと同じ慣習に揃える。
+
+| 接頭辞を付ける | 付けない |
+|---|---|
+| `DynamoDbLiveSession` / `DynamoDbLiveSettings` / `DynamoDbSessionSnapshot` | `PartitionView` / `LaneView` / `LaneInfo` |
+| `DynamoDbLivePreset` / `dynamoDbLivePresets` / `defaultDynamoDbLivePreset` | `Scenario` / `runScenario` / `presets`（バッチ用・CLI 専用） |
+
+線引きの基準は「**1 つのファイルが両サービスを同時に import するか**」。
+バッチ経路（`runScenario.ts` / `presets.ts`）はその状況が来ないので素のままでよい。
 
 ### M3 で気をつけること
 

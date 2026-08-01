@@ -1,5 +1,5 @@
-import type { LoadProfile } from '../sim/loadProfile.js';
-import { DynamoDbTable, type DynamoDbTableConfig, type DynamoDbTickResult } from '../services/dynamodb/table.js';
+import type { LoadProfile } from '../../sim/loadProfile.js';
+import { DynamoDbTable, type DynamoDbTableConfig, type DynamoDbTickResult } from '../../services/dynamodb/table.js';
 
 export interface Scenario {
   readonly name: string;

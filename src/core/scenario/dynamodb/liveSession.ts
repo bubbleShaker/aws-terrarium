@@ -1,16 +1,16 @@
-import { buildKeyWeights, type KeyDistributionSpec } from '../services/dynamodb/keyDistribution.js';
+import { buildKeyWeights, type KeyDistributionSpec } from '../../services/dynamodb/keyDistribution.js';
 import {
   partitionBurstRatio,
   partitionThrottleRate,
-} from '../services/dynamodb/partitionMetrics.js';
+} from '../../services/dynamodb/partitionMetrics.js';
 import {
   type CapacityConfig,
   DynamoDbTable,
   type DynamoDbTickResult,
   type LaneInfo,
   type LaneTickResult,
-} from '../services/dynamodb/table.js';
-import { SimulationClock, type SimulationClockConfig } from '../sim/simulationClock.js';
+} from '../../services/dynamodb/table.js';
+import { SimulationClock, type SimulationClockConfig } from '../../sim/simulationClock.js';
 
 /**
  * インタラクティブに動かすときのテーブル設定。

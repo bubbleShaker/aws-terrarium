@@ -7,8 +7,8 @@ import {
   uniformHealthy,
   zipfWithAdaptive,
   zipfWithoutAdaptive,
-} from '../src/core/scenario/presets.js';
-import { runScenario } from '../src/core/scenario/runScenario.js';
+} from '../src/core/scenario/dynamodb/presets.js';
+import { runScenario } from '../src/core/scenario/dynamodb/runScenario.js';
 
 /**
  * ここは「教材として言っていること」がモデル上も本当に成り立つかを固定するテスト。

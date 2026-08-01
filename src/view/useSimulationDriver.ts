@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import type { DynamoDbLiveSession, DynamoDbSessionSnapshot } from '../core/scenario/dynamoDbLiveSession.js';
+import type { DynamoDbLiveSession, DynamoDbSessionSnapshot } from '../core/scenario/dynamodb/liveSession.js';
 
 /**
  * シミュレーションを実時間で回し、HUD 用のスナップショットを間引いて配る。

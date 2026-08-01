@@ -1,5 +1,5 @@
-import { constantLoad, rampLoad } from '../sim/loadProfile.js';
-import { buildKeyWeights } from '../services/dynamodb/keyDistribution.js';
+import { constantLoad, rampLoad } from '../../sim/loadProfile.js';
+import { buildKeyWeights } from '../../services/dynamodb/keyDistribution.js';
 import type { Scenario } from './runScenario.js';
 
 /**

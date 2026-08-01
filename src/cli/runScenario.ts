@@ -7,8 +7,8 @@
  *   npm run scenario              全プリセットを実行
  *   npm run scenario single-hot-key   1 つだけ実行し、パーティションの内訳も出す
  */
-import { findPreset, presets } from '../core/scenario/presets.js';
-import { runScenario, type ScenarioResult } from '../core/scenario/runScenario.js';
+import { findPreset, presets } from '../core/scenario/dynamodb/presets.js';
+import { runScenario, type ScenarioResult } from '../core/scenario/dynamodb/runScenario.js';
 
 function formatPercent(value: number): string {
   return `${(value * 100).toFixed(1)}%`;
