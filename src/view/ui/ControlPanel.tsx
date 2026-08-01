@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import type { JSX } from 'react';
+import type { JSX, ReactNode } from 'react';
 import type { LaneKind, LiveSettings } from '../../core/scenario/liveSession.js';
 import { type LivePreset, livePresets } from '../../core/scenario/livePresets.js';
 import type { KeyDistributionSpec } from '../../core/services/dynamodb/keyDistribution.js';
@@ -24,7 +24,87 @@ const TIME_SCALES = [
   { value: 60, label: '⏩⏩⏩ 60倍' },
 ] as const;
 
+/** 分布を切り替えたときに使う既定値。切り替えのたびに極端な値へ飛ばないため。 */
+const DEFAULT_SKEW = 0.7;
+const DEFAULT_HOT_RATIO = 0.9;
+
 const number = new Intl.NumberFormat('ja-JP');
+
+interface ChipProps {
+  readonly on: boolean;
+  readonly onClick: () => void;
+  readonly danger?: boolean;
+  readonly children: ReactNode;
+}
+
+function Chip({ on, onClick, danger = false, children }: ChipProps): JSX.Element {
+  return (
+    <button
+      type="button"
+      aria-pressed={on}
+      className={`chip ${danger ? 'chip--danger' : ''} ${on ? 'chip--on' : ''}`}
+      onClick={onClick}
+    >
+      {children}
+    </button>
+  );
+}
+
+interface StructuralRangeProps {
+  readonly id: string;
+  readonly label: string;
+  readonly value: number;
+  readonly min: number;
+  readonly max: number;
+  readonly step: number;
+  readonly format: (value: number) => string;
+  readonly onCommit: (value: number) => void;
+}
+
+/**
+ * テーブルを作り直す設定のスライダー。
+ *
+ * 掴んでいる間は**確定させない**。`onChange` のたびに反映すると、
+ * 1 回のドラッグで数十回テーブルが作り直され、そのたびに仮想時間とバーストが 0 に戻る。
+ * つまりドラッグ中は一度も時間が進まず、何も観測できない。
+ */
+function StructuralRange({
+  id,
+  label,
+  value,
+  min,
+  max,
+  step,
+  format,
+  onCommit,
+}: StructuralRangeProps): JSX.Element {
+  const [draft, setDraft] = useState<number | null>(null);
+  const shown = draft ?? value;
+  const commit = (): void => {
+    if (draft === null) return;
+    setDraft(null);
+    if (draft !== value) onCommit(draft);
+  };
+
+  return (
+    <label className="control__sub" htmlFor={id}>
+      {label} <b>{format(shown)}</b> ⟳
+      <input
+        id={id}
+        type="range"
+        min={min}
+        max={max}
+        step={step}
+        value={shown}
+        onChange={(event) => setDraft(Number(event.target.value))}
+        onPointerUp={commit}
+        onPointerCancel={commit}
+        onKeyUp={commit}
+        onBlur={commit}
+      />
+    </label>
+  );
+}
 
 /**
  * ダイヤル一式。
@@ -32,6 +112,9 @@ const number = new Intl.NumberFormat('ja-JP');
  * `⟳` を付けた項目は、変更するとテーブルを作り直す = シミュレーションがリセットされる。
  * これは実機の挙動ではなく本モデルの都合（`DynamoDbTable` は設定不変）だが、
  * 黙って時刻とバーストが戻ると「なぜ急に直ったのか」が分からなくなるので明示する。
+ *
+ * 表示値はすべて `settings` から導出する。ローカルに控えを持つと、
+ * プリセットを読み込んだときに画面と実体がずれる。
  */
 export function ControlPanel({
   settings,
@@ -43,10 +126,6 @@ export function ControlPanel({
   onLaneChange,
   onTimeScaleChange,
 }: ControlPanelProps): JSX.Element {
-  // 分布の種類を行き来しても値が飛ばないよう、直近のパラメータを覚えておく。
-  const [skew, setSkew] = useState(0.7);
-  const [hotRatio, setHotRatio] = useState(0.9);
-
   const isWrite = lane === 'write';
   const loadValue = isWrite ? settings.writesPerSecond : settings.readsPerSecond;
   const provisioned = settings.capacity.mode === 'provisioned';
@@ -56,6 +135,7 @@ export function ControlPanel({
       : settings.capacity.readCapacityUnits
     : 0;
 
+  const distribution = settings.distribution;
   const setDistribution = (spec: KeyDistributionSpec): void => onChange({ distribution: spec });
 
   const setCapacity = (value: number): void => {
@@ -75,14 +155,13 @@ export function ControlPanel({
         <span className="control__label">プリセット（M1 のシナリオ）</span>
         <div className="chips">
           {livePresets.map((preset) => (
-            <button
+            <Chip
               key={preset.name}
-              type="button"
-              className={`chip ${preset.name === presetName ? 'chip--on' : ''}`}
+              on={preset.name === presetName}
               onClick={() => onLoadPreset(preset)}
             >
               {preset.name}
-            </button>
+            </Chip>
           ))}
         </div>
       </section>
@@ -91,14 +170,9 @@ export function ControlPanel({
         <span className="control__label">見るレーン</span>
         <div className="chips">
           {(['write', 'read'] as const).map((kind) => (
-            <button
-              key={kind}
-              type="button"
-              className={`chip ${kind === lane ? 'chip--on' : ''}`}
-              onClick={() => onLaneChange(kind)}
-            >
+            <Chip key={kind} on={kind === lane} onClick={() => onLaneChange(kind)}>
               {kind === 'write' ? '書き込み' : '読み取り'}
-            </button>
+            </Chip>
           ))}
         </div>
       </section>
@@ -107,6 +181,7 @@ export function ControlPanel({
         <label className="control__label" htmlFor="load">
           負荷 <b>{number.format(Math.round(loadValue))}</b> req/s
         </label>
+        {/* 負荷はテーブルを作り直さないので、動かした端から反映してよい。 */}
         <input
           id="load"
           type="range"
@@ -124,63 +199,59 @@ export function ControlPanel({
       <section className="control">
         <span className="control__label">キー分布 ⟳</span>
         <div className="chips">
-          <button
-            type="button"
-            className={`chip ${settings.distribution.kind === 'uniform' ? 'chip--on' : ''}`}
-            onClick={() => setDistribution({ kind: 'uniform' })}
+          <Chip
+            on={distribution.kind === 'uniform'}
+            onClick={() => {
+              if (distribution.kind !== 'uniform') setDistribution({ kind: 'uniform' });
+            }}
           >
             uniform
-          </button>
-          <button
-            type="button"
-            className={`chip ${settings.distribution.kind === 'zipf' ? 'chip--on' : ''}`}
-            onClick={() => setDistribution({ kind: 'zipf', skew })}
+          </Chip>
+          <Chip
+            on={distribution.kind === 'zipf'}
+            onClick={() => {
+              if (distribution.kind !== 'zipf') setDistribution({ kind: 'zipf', skew: DEFAULT_SKEW });
+            }}
           >
             zipf
-          </button>
-          <button
-            type="button"
-            className={`chip chip--danger ${settings.distribution.kind === 'singleHot' ? 'chip--on' : ''}`}
-            onClick={() => setDistribution({ kind: 'singleHot', hotRatio })}
+          </Chip>
+          <Chip
+            danger
+            on={distribution.kind === 'singleHot'}
+            onClick={() => {
+              if (distribution.kind !== 'singleHot') {
+                setDistribution({ kind: 'singleHot', hotRatio: DEFAULT_HOT_RATIO });
+              }
+            }}
           >
             singleHot
-          </button>
+          </Chip>
         </div>
 
-        {settings.distribution.kind === 'zipf' && (
-          <label className="control__sub">
-            偏り skew <b>{skew.toFixed(2)}</b>
-            <input
-              type="range"
-              min={0}
-              max={1.6}
-              step={0.05}
-              value={skew}
-              onChange={(event) => {
-                const value = Number(event.target.value);
-                setSkew(value);
-                setDistribution({ kind: 'zipf', skew: value });
-              }}
-            />
-          </label>
+        {distribution.kind === 'zipf' && (
+          <StructuralRange
+            id="skew"
+            label="偏り skew"
+            value={distribution.skew}
+            min={0}
+            max={1.6}
+            step={0.05}
+            format={(value) => value.toFixed(2)}
+            onCommit={(skew) => setDistribution({ kind: 'zipf', skew })}
+          />
         )}
 
-        {settings.distribution.kind === 'singleHot' && (
-          <label className="control__sub">
-            1 キーへの集中 <b>{Math.round(hotRatio * 100)}%</b>
-            <input
-              type="range"
-              min={0.1}
-              max={1}
-              step={0.05}
-              value={hotRatio}
-              onChange={(event) => {
-                const value = Number(event.target.value);
-                setHotRatio(value);
-                setDistribution({ kind: 'singleHot', hotRatio: value });
-              }}
-            />
-          </label>
+        {distribution.kind === 'singleHot' && (
+          <StructuralRange
+            id="hot-ratio"
+            label="1 キーへの集中"
+            value={distribution.hotRatio}
+            min={0.1}
+            max={1}
+            step={0.05}
+            format={(value) => `${Math.round(value * 100)}%`}
+            onCommit={(hotRatio) => setDistribution({ kind: 'singleHot', hotRatio })}
+          />
         )}
       </section>
 
@@ -206,17 +277,15 @@ export function ControlPanel({
 
       {provisioned && (
         <section className="control">
-          <label className="control__label" htmlFor="capacity">
-            プロビジョニング {isWrite ? 'WCU' : 'RCU'} <b>{number.format(capacityValue)}</b> ⟳
-          </label>
-          <input
+          <StructuralRange
             id="capacity"
-            type="range"
+            label={`プロビジョニング ${isWrite ? 'WCU' : 'RCU'}`}
+            value={capacityValue}
             min={1_000}
             max={40_000}
             step={1_000}
-            value={capacityValue}
-            onChange={(event) => setCapacity(Number(event.target.value))}
+            format={(value) => number.format(value)}
+            onCommit={setCapacity}
           />
         </section>
       )}
@@ -225,14 +294,15 @@ export function ControlPanel({
         <span className="control__label">項目サイズ ⟳</span>
         <div className="chips">
           {ITEM_SIZES.map((size) => (
-            <button
+            <Chip
               key={size}
-              type="button"
-              className={`chip ${settings.itemSizeKb === size ? 'chip--on' : ''}`}
-              onClick={() => onChange({ itemSizeKb: size })}
+              on={settings.itemSizeKb === size}
+              onClick={() => {
+                if (settings.itemSizeKb !== size) onChange({ itemSizeKb: size });
+              }}
             >
               {size}KB
-            </button>
+            </Chip>
           ))}
         </div>
       </section>
@@ -241,14 +311,13 @@ export function ControlPanel({
         <span className="control__label">時間</span>
         <div className="chips">
           {TIME_SCALES.map((scale) => (
-            <button
+            <Chip
               key={scale.value}
-              type="button"
-              className={`chip ${scale.value === timeScale ? 'chip--on' : ''}`}
+              on={scale.value === timeScale}
               onClick={() => onTimeScaleChange(scale.value)}
             >
               {scale.label}
-            </button>
+            </Chip>
           ))}
         </div>
         <p className="note">

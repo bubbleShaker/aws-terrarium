@@ -239,6 +239,14 @@ Aurora を足すときは、**この `LiveSession` 相当を Aurora 用にもう
 `DynamoDbTable` と `AuroraWriter` は内部モデルが違いすぎるので、
 無理に共通のインターフェースへ押し込めない（そこは M3 で判断する）。
 
+### M3 の着手時にやると決めてあること（M2 のレビュー指摘の持ち越し）
+
+- **`LiveSession` を `DynamoDbLiveSession` に改名する。** 名前だけが汎用で、
+  中身は `DynamoDbTable` を直接 new している。Aurora を足す前に名前を実態へ寄せる
+- **`SessionSnapshot` / `PartitionView` を View 層へ移すか検討する。** これは
+  「画面に出したい数字」で変わる presenter であり、Core の他の部分とは変更理由が違う。
+  Aurora と共用しようとすると必ず歪むので、そのタイミングで判断する
+
 ### M3 で気をつけること
 
 - **同じ負荷を両方に流して並置する**のが M3 の本体。

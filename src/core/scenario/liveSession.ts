@@ -1,5 +1,9 @@
 import { buildKeyWeights, type KeyDistributionSpec } from '../services/dynamodb/keyDistribution.js';
 import {
+  partitionBurstRatio,
+  partitionThrottleRate,
+} from '../services/dynamodb/partitionMetrics.js';
+import {
   type CapacityConfig,
   DynamoDbTable,
   type DynamoDbTickResult,
@@ -137,23 +141,40 @@ export class LiveSession {
    * @returns 作り直したかどうか
    */
   update(patch: Partial<LiveSettings>): boolean {
-    const next: LiveSettings = { ...this.#settings, ...patch };
+    return this.#apply({ ...this.#settings, ...patch });
+  }
+
+  /**
+   * 設定を**まるごと**差し替える。プリセットの読み込み用。
+   *
+   * `update()` に委譲してはいけない。あちらはマージなので、
+   * 省略可能なフィールド (`initialBurstTokens`) が前の設定から残留する。
+   * 「`big-item-trap` を見たあとに他のプリセットを選ぶと、
+   * バーストの貯金が 0 のまま始まる」という形で教材が壊れる。
+   */
+  replace(settings: LiveSettings): boolean {
+    return this.#apply(settings);
+  }
+
+  #apply(next: LiveSettings): boolean {
     const nextShapeKey = tableShapeKey(next);
+    if (nextShapeKey === this.#shapeKey) {
+      // 形が同じなら負荷だけの変更。テーブルは作り直さない。
+      this.#settings = next;
+      return false;
+    }
+
+    // 先に作ってから差し替える。設定が不正で例外が飛んだとき、
+    // 「鍵は新しいのにテーブルは古い」状態で固定されると二度と再構築されなくなる。
+    const table = buildTable(next);
+
     this.#settings = next;
-
-    if (nextShapeKey === this.#shapeKey) return false;
-
     this.#shapeKey = nextShapeKey;
-    this.#table = buildTable(next);
+    this.#table = table;
     this.#latest = undefined;
     this.#generation += 1;
     this.#clock.reset();
     return true;
-  }
-
-  /** 設定をまるごと差し替える。プリセットの読み込み用。 */
-  replace(settings: LiveSettings): boolean {
-    return this.update(settings);
   }
 
   /**
@@ -220,9 +241,9 @@ export class LiveSession {
         throttledUnitsPerSec: p.throttledUnitsPerSec,
         utilizationVsHardCap: p.utilizationVsHardCap,
         utilizationVsBaseline: p.utilizationVsBaseline,
-        burstRatio: info.burstCapacityUnits > 0 ? p.burstTokens / info.burstCapacityUnits : 0,
+        burstRatio: partitionBurstRatio(p, info),
         burstDrawUnitsPerSec: p.burstDrawUnitsPerSec,
-        throttleRate: p.demandedUnitsPerSec > 0 ? p.throttledUnitsPerSec / p.demandedUnitsPerSec : 0,
+        throttleRate: partitionThrottleRate(p),
       };
     });
 
@@ -275,6 +296,8 @@ function tableShapeKey(settings: LiveSettings): string {
  * 同じ内容の設定でもオブジェクトの組み立て方が違うと別物と判定されてしまう。
  */
 function stableStringify(value: unknown): string {
+  // JSON.stringify は NaN も Infinity も "null" にしてしまい、別の設定が同じ鍵になる。
+  if (typeof value === 'number' && !Number.isFinite(value)) return `#${String(value)}`;
   if (value === null || typeof value !== 'object') return JSON.stringify(value) ?? 'null';
   if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`;
   const entries = Object.entries(value as Record<string, unknown>)

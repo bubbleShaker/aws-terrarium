@@ -5,7 +5,8 @@ import type { BufferAttribute, Points } from 'three';
 import type { LaneKind, LiveSession } from '../../core/scenario/liveSession.js';
 import { allocateByWeight } from '../../core/sim/particleSampling.js';
 import { Rng } from '../../core/sim/rng.js';
-import { SOURCE_HEIGHT, columnHeight, gridPositions } from '../visual.js';
+import { partitionThrottleRate } from '../../core/services/dynamodb/partitionMetrics.js';
+import { SOURCE_HEIGHT, columnHeight, gridPositions } from '../layout.js';
 
 interface RequestParticlesProps {
   readonly session: LiveSession;
@@ -58,8 +59,10 @@ export function RequestParticles({
     const speed = new Float32Array(maxParticles);
     const scatterLife = new Float32Array(maxParticles);
     const velocity = new Float32Array(maxParticles * 3);
-    const rejected = new Uint8Array(maxParticles);
     const jitter = new Float32Array(maxParticles * 2);
+    // 配分されなかった粒子 (重みが 0 のパーティションしか無い退化ケース) は、
+    // 原点に置いたままだと空中の一点として描かれるので画面外へ退避させる。
+    for (let i = 0; i < maxParticles; i += 1) positions[i * 3 + 1] = -50;
 
     // 重みに比例した配分。合計が maxParticles にぴったり一致する（余った粒子が出ない）。
     const counts = allocateByWeight(session.table.partitionWeights, maxParticles);
@@ -89,7 +92,6 @@ export function RequestParticles({
       speed,
       scatterLife,
       velocity,
-      rejected,
       jitter,
       rng,
       // 配分に使ったのは cursor 個まで。重みが 0 のパーティションしか無い場合に備える。
@@ -109,7 +111,8 @@ export function RequestParticles({
     const dt = Math.min(delta, 0.1); // タブ復帰時に粒子が瞬間移動しないよう頭を押さえる
     const info = session.table.lanes[lane];
     const laneTick = session.latest?.[lane];
-    const { positions: pos, colors, partitionOf, progress, speed, scatterLife, velocity, rejected, jitter, rng } = state;
+    const { positions: pos, colors, partitionOf, progress, speed, scatterLife, velocity, jitter, rng } =
+      state;
 
     for (let i = 0; i < state.active; i += 1) {
       const partition = partitionOf[i] ?? 0;
@@ -133,10 +136,7 @@ export function RequestParticles({
         colors[i3] = REJECTED[0] * fade;
         colors[i3 + 1] = REJECTED[1] * fade;
         colors[i3 + 2] = REJECTED[2] * fade;
-        if (life <= 0) {
-          progress[i] = 0;
-          rejected[i] = 0;
-        }
+        if (life <= 0) progress[i] = 0;
         continue;
       }
 
@@ -152,9 +152,7 @@ export function RequestParticles({
       const t = (progress[i] ?? 0) + (speed[i] ?? 0.7) * dt;
       if (t >= 1) {
         // 着弾。ここで初めて受理か拒否かが分かる。
-        const throttleRate = demanded > 0 ? (tick?.throttledUnitsPerSec ?? 0) / demanded : 0;
-        if (rng.next() < throttleRate) {
-          rejected[i] = 1;
+        if (rng.next() < partitionThrottleRate(tick)) {
           scatterLife[i] = SCATTER_SECONDS;
           velocity[i3] = rng.nextInRange(-2.2, 2.2);
           velocity[i3 + 1] = rng.nextInRange(1.5, 4);

@@ -2,7 +2,7 @@ import type { JSX } from 'react';
 import { OrbitControls } from '@react-three/drei';
 import { Canvas } from '@react-three/fiber';
 import type { LaneKind, LiveSession } from '../../core/scenario/liveSession.js';
-import { HEIGHT_AT_HARD_CAP, gridExtent } from '../visual.js';
+import { HEIGHT_AT_HARD_CAP, gridExtent } from '../layout.js';
 import { PartitionColumns } from './PartitionColumns.js';
 import { RequestParticles } from './RequestParticles.js';
 

@@ -25,7 +25,7 @@ export function useSimulationDriver(session: LiveSession, hudHz = 10): SessionSn
     let frame = 0;
     let last = performance.now();
     let sinceSnapshot = 0;
-    const interval = 1 / hudHz;
+    const interval = 1 / Math.max(1, hudHz);
 
     const loop = (now: number): void => {
       const deltaSeconds = (now - last) / 1000;

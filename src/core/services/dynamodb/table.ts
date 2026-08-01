@@ -113,6 +113,7 @@ export class DynamoDbTable {
   readonly #readUnitsPerRequest: number;
   readonly #writeUnitsPerRequest: number;
   readonly #adaptiveCapacity: boolean;
+  readonly #lanes: { readonly read: LaneInfo; readonly write: LaneInfo };
   #elapsedSeconds = 0;
 
   constructor(config: DynamoDbTableConfig) {
@@ -148,6 +149,8 @@ export class DynamoDbTable {
 
     this.#readUnitsPerRequest = readUnitsPerRequest(config.itemSizeKb, config.consistentRead);
     this.#writeUnitsPerRequest = writeUnitsPerRequest(config.itemSizeKb);
+
+    this.#lanes = { read: toLaneInfo(this.#readLane), write: toLaneInfo(this.#writeLane) };
   }
 
   get partitionCount(): number {
@@ -184,10 +187,8 @@ export class DynamoDbTable {
    * View が「柱の高さの基準」「ゲージの満タン」を決めるのに使う。
    */
   get lanes(): { readonly read: LaneInfo; readonly write: LaneInfo } {
-    return {
-      read: toLaneInfo(this.#readLane),
-      write: toLaneInfo(this.#writeLane),
-    };
+    // 毎フレーム読まれるので、構築時に 1 度だけ作って使い回す。
+    return this.#lanes;
   }
 
   /** シミュレーションを 1 tick 進める。 */

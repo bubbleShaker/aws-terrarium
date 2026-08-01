@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import type { JSX } from 'react';
 import { LiveSession, type LaneKind, type LiveSettings } from '../core/scenario/liveSession.js';
 import { type LivePreset, defaultLivePreset } from '../core/scenario/livePresets.js';
@@ -15,7 +15,8 @@ import { useSimulationDriver } from './useSimulationDriver.js';
  * 値を変えるときは必ず session を先に更新する。
  */
 export function App(): JSX.Element {
-  const session = useMemo(() => new LiveSession(defaultLivePreset.settings), []);
+  // useMemo はキャッシュを捨てることが許されている。シミュレーション本体の保持先には使えない。
+  const [session] = useState(() => new LiveSession(defaultLivePreset.settings));
   const [settings, setSettings] = useState<LiveSettings>(defaultLivePreset.settings);
   const [presetName, setPresetName] = useState(defaultLivePreset.name);
   const [lesson, setLesson] = useState(defaultLivePreset.lesson);
@@ -42,7 +43,9 @@ export function App(): JSX.Element {
   const handleLoadPreset = useCallback(
     (preset: LivePreset) => {
       session.replace(preset.settings);
-      setSettings(preset.settings);
+      // 設定の出所は session に一本化する。preset.settings をそのまま入れると、
+      // 省略可能なフィールドの扱いが session 側とずれる。
+      setSettings(session.settings);
       setPresetName(preset.name);
       setLesson(preset.lesson);
       setLane(preset.focusLane);
@@ -52,7 +55,11 @@ export function App(): JSX.Element {
 
   return (
     <div className="app">
-      <TerrariumScene session={session} lane={lane} generation={snapshot.generation} />
+      {/*
+        generation は snapshot (10Hz) 経由では最大 100ms 遅れる。
+        柱と粒子を作り直す合図なので、session から直接読む。
+      */}
+      <TerrariumScene session={session} lane={lane} generation={session.generation} />
       <StatusHud snapshot={snapshot} lane={lane} lesson={lesson} presetName={presetName} />
       <ControlPanel
         settings={settings}

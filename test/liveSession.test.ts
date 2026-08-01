@@ -76,6 +76,31 @@ describe('LiveSession', () => {
     expect(session.generation).toBe(0);
   });
 
+  it('replace は省略可能なフィールドを残さない（プリセットを押す順序で結果が変わらない）', () => {
+    // `big-item-trap` だけが initialBurstTokens: 0 を持つ。
+    // replace がマージだと、そのあと他のプリセットを選んでも 0 が残り、
+    // 「バーストの貯金が尽きるまで障害は表面化しない」という教材の山場が消える。
+    const bigItem = findLivePreset('big-item-trap');
+    const zipf = findLivePreset('zipf-without-adaptive');
+    expect(bigItem).toBeDefined();
+    expect(zipf).toBeDefined();
+    if (bigItem === undefined || zipf === undefined) return;
+
+    const direct = new LiveSession(zipf.settings);
+    advanceSeconds(direct, 60);
+
+    const viaBigItem = new LiveSession(bigItem.settings);
+    viaBigItem.replace(zipf.settings);
+    advanceSeconds(viaBigItem, 60);
+
+    expect(viaBigItem.settings.initialBurstTokens).toBeUndefined();
+    expect(viaBigItem.snapshot().write.hottest?.burstRatio).toBeCloseTo(
+      direct.snapshot().write.hottest?.burstRatio ?? -1,
+      10,
+    );
+    expect(viaBigItem.snapshot().write.throttleRate).toBe(0);
+  });
+
   it('進める前でも snapshot が柱の本数ぶん揃っている（View に分岐を持ち込まないため）', () => {
     const session = new LiveSession(baseSettings);
     const snapshot = session.snapshot();

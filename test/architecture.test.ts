@@ -84,6 +84,11 @@ describe('Core 層の独立性', () => {
   it('src/core は I/O を持たない（console / process / DOM グローバル）', async () => {
     // import だけ見ていてもグローバル経由の I/O は素通りする。
     // CLI を src/core に置いてしまった実績があるので、識別子レベルでも塞ぐ。
+    //
+    // 実時間と無シードの乱数もここで塞ぐ。M2 で「実時間で動かす」経路が入ったが、
+    // 実時間に触れてよいのは View 層の rAF ループだけで、そこから先は必ず
+    // SimulationClock の固定タイムステップを通る。Core が直接掴んだ時点で
+    // 「同じ設定なら同じ結果」というこのプロジェクトの土台が崩れる。
     const forbiddenGlobals = [
       /\bconsole\s*\./,
       /\bprocess\s*\./,
@@ -91,6 +96,13 @@ describe('Core 層の独立性', () => {
       /\bwindow\s*\./,
       /\blocalStorage\b/,
       /\bfetch\s*\(/,
+      /\bMath\s*\.\s*random\b/,
+      /\bDate\s*\.\s*now\b/,
+      /\bnew\s+Date\b/,
+      /\bperformance\s*\./,
+      /\brequestAnimationFrame\b/,
+      /\bsetTimeout\b/,
+      /\bsetInterval\b/,
     ];
 
     const files = await collectTsFiles(CORE_DIR);

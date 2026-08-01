@@ -4,14 +4,11 @@ import type { JSX } from 'react';
 import { Color, type InstancedMesh, type Mesh, Object3D } from 'three';
 import type { LaneKind, LiveSession } from '../../core/scenario/liveSession.js';
 import {
-  ACCEPTED_WIDTH,
-  COLUMN_WIDTH,
-  acceptedColor,
-  columnHeight,
-  damp,
-  gridPositions,
-  heatColor,
-} from '../visual.js';
+  partitionBurstRatio,
+  partitionThrottleRate,
+} from '../../core/services/dynamodb/partitionMetrics.js';
+import { ACCEPTED_WIDTH, COLUMN_WIDTH, columnHeight, damp, gridPositions } from '../layout.js';
+import { acceptedColor, heatColor } from '../palette.js';
 
 interface PartitionColumnsProps {
   readonly session: LiveSession;
@@ -75,10 +72,11 @@ export function PartitionColumns({ session, lane }: PartitionColumnsProps): JSX.
       const partition = laneTick?.partitions[i];
       const demanded = partition?.demandedUnitsPerSec ?? 0;
       const accepted = partition?.acceptedUnitsPerSec ?? 0;
-      const throttleRate = demanded > 0 ? (partition?.throttledUnitsPerSec ?? 0) / demanded : 0;
       const utilization = partition?.utilizationVsHardCap ?? 0;
-      const burstRatio =
-        info.burstCapacityUnits > 0 ? (partition?.burstTokens ?? info.burstCapacityUnits) / info.burstCapacityUnits : 0;
+      // 率の定義は Core に 1 つだけ置く。ここで再実装すると、
+      // Core の集計と 3D の見た目が別々の定義を持つことになる。
+      const throttleRate = partitionThrottleRate(partition);
+      const burstRatio = partitionBurstRatio(partition, info);
 
       const position = positions[i];
       if (position === undefined) continue;
