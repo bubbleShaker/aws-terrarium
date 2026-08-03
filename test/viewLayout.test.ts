@@ -27,7 +27,7 @@ import {
 } from '../src/view/layout.js';
 import { AURORA_INSTANCE_CLASSES } from '../src/core/services/aurora/instanceClasses.js';
 import { TerrariumDriver } from '../src/core/scenario/driver.js';
-import { sameLoadBothSides } from '../src/core/scenario/terrariumPresets.js';
+import { sameLoadEverywhere } from '../src/core/scenario/terrariumPresets.js';
 
 /**
  * View 層の配置計算のテスト。
@@ -138,8 +138,9 @@ describe('requestsPerParticle / particleCount', () => {
     // 「どちらのフィールドを読むか」というずれやすい判断が固定できない。
     const driver = new TerrariumDriver({
       load: { readsPerSecond: 0, writesPerSecond: 500 },
-      dynamodb: sameLoadBothSides.dynamodb,
-      aurora: { ...sameLoadBothSides.aurora, retry },
+      dynamodb: sameLoadEverywhere.dynamodb,
+      aurora: { ...sameLoadEverywhere.aurora, retry },
+      sqs: sameLoadEverywhere.sqs,
     });
 
     for (let frame = 0; frame < 60 * 60; frame += 1) {

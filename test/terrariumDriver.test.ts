@@ -28,6 +28,8 @@ const matchedCapacityConfig: TerrariumDriverConfig = {
     initialBurstTokens: 0,
   },
   aurora: { instanceClass: 'db.r6g.large' },
+  // consumer 2 個 × 5ms = 400 件/秒。DynamoDB / Aurora と同容量。
+  sqs: { consumerCount: 2 },
 };
 
 function makeDriver(): TerrariumDriver {
@@ -48,6 +50,7 @@ describe('TerrariumDriver — 時計は 1 本しかない', () => {
 
     expect('clock' in driver.dynamodb).toBe(false);
     expect('clock' in driver.aurora).toBe(false);
+    expect('clock' in driver.sqs).toBe(false);
 
     // `step` は実体としては存在する（driver が呼ぶ）が、driver 経由で受け取る型からは
     // 外してある。下の 2 行は `@ts-expect-error` が**外れたら失敗する**ので、
@@ -56,6 +59,8 @@ describe('TerrariumDriver — 時計は 1 本しかない', () => {
     expect(typeof driver.dynamodb.step).toBe('function');
     // @ts-expect-error 片方だけ進める経路は型で塞がれている
     expect(typeof driver.aurora.step).toBe('function');
+    // @ts-expect-error 片方だけ進める経路は型で塞がれている
+    expect(typeof driver.sqs.step).toBe('function');
   });
 
   it('フレーム時間が揺れても両者の経過時間がズレない', () => {
@@ -68,12 +73,14 @@ describe('TerrariumDriver — 時計は 1 本しかない', () => {
       // 毎フレーム、しかも厳密一致で確認する。同じ値を同じ順序で足しているだけなので
       // 丸め差すら出ないはずで、緩めると「1 tick ズレ」以外の取りこぼしを見逃す。
       expect(driver.aurora.writer.elapsedSeconds).toBe(driver.dynamodb.table.elapsedSeconds);
+      expect(driver.sqs.queue.elapsedSeconds).toBe(driver.dynamodb.table.elapsedSeconds);
     }
 
     expect(driver.simulatedSeconds).toBe(driver.dynamodb.table.elapsedSeconds);
     expect(driver.aurora.snapshot().simulatedSeconds).toBe(
       driver.dynamodb.snapshot().simulatedSeconds,
     );
+    expect(driver.sqs.snapshot().simulatedSeconds).toBe(driver.dynamodb.snapshot().simulatedSeconds);
   });
 
   it('timeScale を途中で変えても両者の経過時間がズレない', () => {
@@ -86,37 +93,42 @@ describe('TerrariumDriver — 時計は 1 本しかない', () => {
       for (let i = 0; i < 30; i += 1) {
         driver.advance(1 / 60);
         expect(driver.aurora.writer.elapsedSeconds).toBe(driver.dynamodb.table.elapsedSeconds);
+        expect(driver.sqs.queue.elapsedSeconds).toBe(driver.dynamodb.table.elapsedSeconds);
       }
     }
 
     expect(driver.simulatedSeconds).toBeGreaterThan(0);
   });
 
-  it('負荷ダイヤルは 1 本で、同じ値が両方へ届く', () => {
+  it('負荷ダイヤルは 1 本で、同じ値が全員へ届く', () => {
     const driver = makeDriver();
     driver.setLoad({ writesPerSecond: 1_000 });
     driver.advance(0.1);
 
     expect(driver.dynamodb.latest?.write.demandedRequestsPerSec).toBeCloseTo(1_000, 10);
     expect(driver.aurora.latest?.demandedRequestsPerSec).toBeCloseTo(1_000, 10);
+    expect(driver.sqs.latest?.demandedMessagesPerSec).toBeCloseTo(1_000, 10);
     expect(driver.load).toEqual({ readsPerSecond: 0, writesPerSecond: 1_000 });
   });
 
-  it('負荷を変えてもテーブルも writer も作り直されない', () => {
+  it('負荷を変えてもテーブルも writer も queue も作り直されない', () => {
     // ダイヤルを回すたびに作り直されると、経過時間もバーストの貯金も待ち行列も
     // 毎回 0 に戻る＝何も観測できなくなる。
     const driver = makeDriver();
     advanceSeconds(driver, 5);
     const table = driver.dynamodb.table;
     const writer = driver.aurora.writer;
+    const queue = driver.sqs.queue;
 
     driver.setLoad({ writesPerSecond: 2_000 });
     advanceSeconds(driver, 1);
 
     expect(driver.dynamodb.table).toBe(table);
     expect(driver.aurora.writer).toBe(writer);
+    expect(driver.sqs.queue).toBe(queue);
     expect(driver.dynamodb.generation).toBe(0);
     expect(driver.aurora.generation).toBe(0);
+    expect(driver.sqs.generation).toBe(0);
   });
 
   it('負荷に NaN を入れると弾かれる（Aurora の Q は一度汚れると復帰しないため）', () => {
@@ -162,6 +174,41 @@ describe('TerrariumDriver — M3 の核心', () => {
     expect('latencyMs' in dynamodb).toBe(false);
   });
 
+  it('同じ 500 q/s を SQS へ流すと、三者三様の壊れ方が並ぶ（M4 の看板）', () => {
+    // 過負荷時の壊れ方の三分類を、**同じ瞬間・同じ負荷**で 1 つのスナップショットに揃える。
+    //
+    // | | 受理 | 拒否 | 症状 |
+    // |---|---|---|---|
+    // | DynamoDB | 400 | 100 | 即座に拒否 |
+    // | Aurora | 400 | 100 | 2.6 秒待たせてから拒否 |
+    // | SQS | **500（全部）** | **0** | 何も起きない。溜まるだけ |
+    const driver = makeDriver();
+    advanceSeconds(driver, 60);
+    const { dynamodb, aurora, sqs } = driver.snapshot();
+
+    // 容量は 3 つとも 400 q/s に揃えてある。揃っていないと対比が成立しない。
+    expect(aurora.capacityPerSec).toBe(400);
+    expect(sqs.capacityPerSec).toBe(400);
+
+    // DynamoDB / Aurora は 100 q/s を弾いているのに、SQS は 1 件も弾いていない。
+    expect(dynamodb.write.throttledRequestsPerSec).toBeCloseTo(100, 6);
+    expect(aurora.rejectedRequestsPerSec).toBeCloseTo(100, 6);
+    expect(sqs.rejectedMessagesPerSec).toBe(0);
+    expect(sqs.enqueuedMessagesPerSec).toBeCloseTo(500, 6);
+
+    // producer 側の指標は完全に健全なまま。エラーも遅延も出ていない。
+    expect(sqs.sendLatencyMs).toBe(10);
+    expect(sqs.expiredMessagesPerSec).toBe(0);
+
+    // 唯一の異常は、ここにしか出ていない。
+    // 超過 100 件/秒 がそのまま積み上がり、年齢は毎秒 0.2 秒ずつ伸びる。
+    const elapsed = driver.simulatedSeconds;
+    expect(elapsed).toBeCloseTo(60, 0);
+    expect(sqs.queueDepth).toBeCloseTo(elapsed * 100, 3);
+    expect(sqs.oldestMessageAgeSeconds).toBeCloseTo(elapsed * 0.2, 3);
+    expect(sqs.backlogGrowthPerSec).toBeCloseTo(100, 6);
+  });
+
   it('エラーが 1 件も出ないままレイテンシだけが伸びる区間がある', () => {
     // ρ=1.05 のわずかな過負荷。待合室が 1,000 席あるので、最初のエラーまで数十秒かかる。
     // その間 CloudWatch のエラー率は完全な無風に見える。
@@ -180,13 +227,14 @@ describe('TerrariumDriver — M3 の核心', () => {
     expect(late.rejectedRequestsPerSec).toBeGreaterThan(0);
   });
 
-  it('プリセットの負荷をそのまま両方へ流せる', () => {
-    // 負荷ダイヤルは共有なので、DynamoDB 向けに選んだ数字が Aurora にも流れる。
-    // Aurora は瞬時に飽和するが、それ自体が「同じ負荷でも壊れ方が違う」という見どころになる。
+  it('プリセットの負荷をそのまま全員へ流せる', () => {
+    // 負荷ダイヤルは共有なので、DynamoDB 向けに選んだ数字が Aurora にも SQS にも流れる。
+    // 壊れ方が三者三様に分かれること自体が見どころになる。
     const driver = new TerrariumDriver({
       load: defaultDynamoDbLivePreset.load,
       dynamodb: defaultDynamoDbLivePreset.settings,
       aurora: { instanceClass: 'db.r6g.large' },
+      sqs: { consumerCount: 2 },
     });
     advanceSeconds(driver, 10);
     const { dynamodb, aurora } = driver.snapshot();

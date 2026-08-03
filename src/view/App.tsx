@@ -34,6 +34,10 @@ export function App(): JSX.Element {
         load: defaultTerrariumPreset.load,
         dynamodb: defaultTerrariumPreset.dynamodb,
         aurora: defaultTerrariumPreset.aurora,
+        // M4-1 時点では画面に出していない（3D と HUD は M4-2）。
+        // それでも driver に載せてあるのは、**プリセットが全サービスを同時に戻す**という
+        // 不変条件を、描画より先に成立させておくためである。
+        sqs: defaultTerrariumPreset.sqs,
       }),
   );
   const [settings, setSettings] = useState<DynamoDbLiveSettings>(defaultTerrariumPreset.dynamodb);
@@ -88,12 +92,17 @@ export function App(): JSX.Element {
     [driver],
   );
 
-  // プリセットは**両サービスを同時に**元へ戻す。片方だけ前の状態が残ると、
-  // 「同じ負荷を、容量の等しい 2 つへ流す」という看板シナリオが静かに崩れる。
+  // プリセットは**全サービスを同時に**元へ戻す。1 つでも前の状態が残ると、
+  // 「同じ負荷を、容量の等しいサービスへ流す」という看板シナリオが静かに崩れる。
+  //
+  // SQS では**溜まったバックログごと**戻す必要がある。ここを忘れると、
+  // 前のシナリオで積み上がった数十万件を抱えたまま次のシナリオが始まり、
+  // 「最初から手遅れ」の状態を見せることになる。
   const handleLoadPreset = useCallback(
     (preset: TerrariumPreset) => {
       driver.dynamodb.replace(preset.dynamodb);
       driver.aurora.replace(preset.aurora);
+      driver.sqs.replace(preset.sqs);
       driver.setLoad(preset.load);
       // 設定の出所は driver に一本化する。preset をそのまま入れると、
       // 省略可能なフィールドの扱いが session 側とずれる。

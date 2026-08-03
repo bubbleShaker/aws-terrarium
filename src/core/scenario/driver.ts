@@ -10,14 +10,21 @@ import {
   type DynamoDbLiveSettings,
   type DynamoDbSessionSnapshot,
 } from './dynamodb/liveSession.js';
+import {
+  SqsLiveSession,
+  type SqsLiveSettings,
+  type SqsSessionSnapshot,
+} from './sqs/liveSession.js';
 import type { AuroraWriter } from '../services/aurora/writer.js';
 import type { DynamoDbTable } from '../services/dynamodb/table.js';
+import type { SqsQueue } from '../services/sqs/queue.js';
 
 export interface TerrariumDriverConfig {
   /** 負荷ダイヤルの初期値。**1 本しかない**。 */
   readonly load: Demand;
   readonly dynamodb: DynamoDbLiveSettings;
   readonly aurora: AuroraLiveSettings;
+  readonly sqs: SqsLiveSettings;
   readonly clock?: SimulationClockConfig | undefined;
 }
 
@@ -42,6 +49,17 @@ export type DrivenSession<T> = Omit<T, 'step'>;
 export type ObservedAuroraWriter = Omit<AuroraWriter, 'step' | 'retryPolicy'>;
 /** 3D が読むだけのテーブル。 */
 export type ObservedDynamoDbTable = Omit<DynamoDbTable, 'step'>;
+/**
+ * 3D が読むだけのキュー。
+ *
+ * `consumerCount` / `messageRetentionSeconds` の setter も塞ぐ（`retryPolicy` と同じ理由）。
+ * 設定を通さずにキューだけ変えると `SqsLiveSettings` と実体が乖離し、
+ * ControlPanel の表示が嘘になる。
+ */
+export type ObservedSqsQueue = Omit<SqsQueue, 'step' | 'consumerCount' | 'messageRetentionSeconds'> & {
+  readonly consumerCount: number;
+  readonly messageRetentionSeconds: number;
+};
 
 /** View（3D・HUD）が受け取るセッションの型。時間を進める手段は含まれていない。 */
 export type DrivenDynamoDbSession = Omit<DrivenSession<DynamoDbLiveSession>, 'table'> & {
@@ -50,32 +68,42 @@ export type DrivenDynamoDbSession = Omit<DrivenSession<DynamoDbLiveSession>, 'ta
 export type DrivenAuroraSession = Omit<DrivenSession<AuroraLiveSession>, 'writer'> & {
   readonly writer: ObservedAuroraWriter;
 };
+export type DrivenSqsSession = Omit<DrivenSession<SqsLiveSession>, 'queue'> & {
+  readonly queue: ObservedSqsQueue;
+};
 
 /** 画面 1 枚ぶんの状態を、**同一時刻**で切り出したもの。 */
 export interface TerrariumSnapshot {
-  /** 画面全体の経過時間 (秒)。両サービスに共通の唯一の時計。 */
+  /** 画面全体の経過時間 (秒)。全サービスに共通の唯一の時計。 */
   readonly simulatedSeconds: number;
   readonly timeScale: number;
   readonly load: Demand;
   readonly dynamodb: DynamoDbSessionSnapshot;
   readonly aurora: AuroraSessionSnapshot;
+  readonly sqs: SqsSessionSnapshot;
 }
 
 /**
- * DynamoDB と Aurora を**同じ時間・同じ負荷**で並べて走らせる駆動体。
+ * DynamoDB / Aurora / SQS を**同じ時間・同じ負荷**で並べて走らせる駆動体。
  *
- * ## なぜこれが要るのか（M3 の主題そのもの）
+ * ## なぜこれが要るのか（M3 / M4 の主題そのもの）
  *
- * M3 で見せたいのは「同じ 500 q/s を流したとき、受理も拒否も同じ数字なのに
- * レイテンシだけが 5ms 対 2,646ms になる」ことである。
- * この主張が成り立つのは**両者にまったく同じものを流したときだけ**なので、
+ * 見せたいのは「同じ 500 q/s を、どれも容量 400 q/s のサービスへ流したとき」の差である:
+ *
+ * | | 受理 | 拒否 | 症状 |
+ * |---|---|---|---|
+ * | DynamoDB | 400 q/s | 100 q/s | 5 ms 一定 |
+ * | Aurora | 400 q/s | 100 q/s | 2,646 ms |
+ * | SQS | **500 q/s（全部）** | **0** | 何も起きない。100 件/秒ずつ溜まる |
+ *
+ * この主張が成り立つのは**全員にまったく同じものを流したときだけ**なので、
  * 「同じものを流している」を規律ではなく**構造**で保証する必要がある。
  *
  * そのために、このクラスが 2 つのものを独占する:
  *
  * ### 1. 時計を 1 本にする
  *
- * 各セッションが `SimulationClock` を持つと時計が 2 つになる。
+ * 各セッションが `SimulationClock` を持つと時計がサービスの数だけできる。
  * 同じ経過秒を配っている限り結果は一致するが、`timeScale`（早送り）を
  * 片方にだけ適用した瞬間に**静かにズレる**。しかも症状は
  * 「レイテンシの差が縮んで見える」なので、バグではなく発見に見えてしまう。
@@ -91,15 +119,20 @@ export interface TerrariumSnapshot {
  *
  * ## 一方、束ねないもの
  *
- * `DynamoDbLiveSession` と `AuroraLiveSession` を共通インターフェースへは押し込めない。
- * 内部モデルが違いすぎる（テーブルの形 vs 1 台のインスタンスの諸元）ので、
- * 抽象化しても「どちらでもない何か」ができるだけになる。
- * ここは 2 つを**具体的なまま持つ**。共有するのは時間と負荷だけでよい。
+ * 3 つのセッションを共通インターフェースへは押し込めない。
+ * 内部モデルが違いすぎる（テーブルの形 / 1 台のインスタンスの諸元 / キューと consumer）ので、
+ * 抽象化しても「どれでもない何か」ができるだけになる。
+ * ここは 3 つを**具体的なまま持つ**。共有するのは時間と負荷だけでよい。
+ *
+ * ⚠️ **サービスを足すたびにこのクラスだけが太る**のは意図した設計である。
+ * 増えるのは「同じ負荷を配る」「同じ瞬間で切り出す」という 1 行ずつだけで、
+ * 各サービスのモデルは互いを一切知らないまま独立していられる。
  */
 export class TerrariumDriver {
   readonly #clock: SimulationClock;
   readonly #dynamodb: DynamoDbLiveSession;
   readonly #aurora: AuroraLiveSession;
+  readonly #sqs: SqsLiveSession;
   #load: Demand;
 
   constructor(config: TerrariumDriverConfig) {
@@ -107,6 +140,7 @@ export class TerrariumDriver {
     this.#load = validateLoad(config.load);
     this.#dynamodb = new DynamoDbLiveSession(config.dynamodb);
     this.#aurora = new AuroraLiveSession(config.aurora);
+    this.#sqs = new SqsLiveSession(config.sqs);
   }
 
   get dynamodb(): DrivenDynamoDbSession {
@@ -115,6 +149,10 @@ export class TerrariumDriver {
 
   get aurora(): DrivenAuroraSession {
     return this.#aurora;
+  }
+
+  get sqs(): DrivenSqsSession {
+    return this.#sqs;
   }
 
   /** 共有の負荷ダイヤルの現在値。 */
@@ -156,17 +194,18 @@ export class TerrariumDriver {
    */
   advance(realDeltaSeconds: number): number {
     return this.#clock.advance(realDeltaSeconds, (tickSeconds) => {
-      // ⚠️ 同じ `Demand` の参照と同じ tick 幅を両方へ配る。
-      // ここで負荷を作り分けたり、片方だけ 2 回進めたりした瞬間に M3 の対比が崩れる。
+      // ⚠️ 同じ `Demand` の参照と同じ tick 幅を全員へ配る。
+      // ここで負荷を作り分けたり、1 つだけ 2 回進めたりした瞬間に並置の対比が崩れる。
       this.#dynamodb.step(this.#load, tickSeconds);
       this.#aurora.step(this.#load, tickSeconds);
+      this.#sqs.step(this.#load, tickSeconds);
     });
   }
 
   /**
-   * View 向けの状態。**必ず両方を 1 回で取る**。
+   * View 向けの状態。**必ず全員を 1 回で取る**。
    *
-   * 片方ずつ別のタイミングで読むと、tick をまたいだ数字が並んで
+   * 1 つずつ別のタイミングで読むと、tick をまたいだ数字が並んで
    * 「同じ瞬間の比較」でなくなる。並置の主張はそこが崩れると成立しない。
    */
   snapshot(): TerrariumSnapshot {
@@ -176,6 +215,7 @@ export class TerrariumDriver {
       load: this.#load,
       dynamodb: this.#dynamodb.snapshot(),
       aurora: this.#aurora.snapshot(),
+      sqs: this.#sqs.snapshot(),
     };
   }
 }
@@ -183,9 +223,10 @@ export class TerrariumDriver {
 /**
  * 負荷の値を検査する。
  *
- * NaN をここで止めるのは Aurora のためである。待ち行列 Q は tick をまたいで持続するので、
- * 一度でも NaN が混じると以降どんな正常な入力を流しても復帰しない。
- * `AuroraWriter` 側にも同じ防御があるが、そちらは黙って 0 に潰す。
+ * NaN をここで止めるのは Aurora と SQS のためである。どちらも滞留状態が tick をまたぐので、
+ * 一度でも NaN が混じると以降どんな正常な入力を流しても復帰しない
+ * （SQS はさらに `ArrivalLedger` の折れ線まで壊れ、年齢の逆引きも道連れになる）。
+ * 各モデル側にも同じ防御があるが、そちらは黙って 0 に潰す。
  * ダイヤルの入口では**気づける形で失敗させる**ほうがよい。
  */
 function validateLoad(load: Demand): Demand {
