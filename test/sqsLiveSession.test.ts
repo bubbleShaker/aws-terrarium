@@ -158,10 +158,11 @@ describe('SqsLiveSession — 教材の主張を担う数字', () => {
     expect(expiring.expiredMessagesPerSec).toBeGreaterThan(0);
   });
 
-  it('⚠️ 送信を完全に止めても、掃けきるまで年齢は伸び続ける', () => {
+  it('⚠️ 送信を止めても、先頭が過負荷の層に居る間は年齢が伸び続ける', () => {
     // 年齢が伸びる速さを決めているのは「**先頭が到着した当時の**到着レート」なので、
     // いま 1 件も送っていなくても、先頭が過負荷の層に居る限り伸び続ける。
     // 「送信を止めたのだから、あとは待てばよい」が通じない — 保持期間が先に来ることがある。
+    // ⚠️ ただし「止めれば必ず伸び続ける」ではない。下のテストが反例を押さえている。
     const session = new SqsLiveSession({ consumerCount: 2, messageRetentionSeconds: 60 });
     run(session, 500, 100);
     const stopped = run(session, 0, 5);
@@ -169,6 +170,33 @@ describe('SqsLiveSession — 教材の主張を担う数字', () => {
     expect(stopped.enqueuedMessagesPerSec).toBe(0);
     expect(stopped.oldestMessageAgeGrowthPerSec).toBeGreaterThan(0);
     expect(stopped.secondsUntilFirstExpiry).toBeDefined();
+  });
+
+  it('⚠️ 年齢が止まっている平衡点で、猶予が天文学的な数字に化けない', () => {
+    // 伸びる速さは前 tick との差で実測しているので、年齢が止まると
+    // **ほぼ等しい 2 数の引き算**になり、桁落ちで ±5e-13 の揺れが出る。
+    // それで残り時間を割ると 6e+13 秒（約 200 万年）が出て、
+    // 符号も揺れるので HUD が「—」と天文学的な数字を往復する。
+    const session = new SqsLiveSession({ consumerCount: 2, messageRetentionSeconds: 60 });
+    // 過負荷で 500 件/秒 の層を 50,000 件つくってから、容量ちょうどへ落とす。
+    run(session, 500, 100);
+
+    // ⚠️ 先頭が 500 の層を抜けきるまで（さらに 25 秒）は伸び続けるので、
+    // そこを通り越すまで回さないと平衡点に届かない。
+    // ガード無しだとこの区間の 25 tick で 2.5e+14 秒（780 万年）が出る。
+    let sawEquilibrium = false;
+    for (let i = 0; i < 1_000; i += 1) {
+      const snapshot = run(session, 400, 0.1);
+      if (snapshot.oldestMessageAgeGrowthPerSec === 0) sawEquilibrium = true;
+
+      const grace = snapshot.secondsUntilFirstExpiry;
+      if (grace !== undefined) {
+        // 出すなら現実的な範囲であること（保持期間の 1,000 倍を超えたら明らかに桁落ち）。
+        expect(grace).toBeLessThan(60 * 1_000);
+      }
+    }
+    // テストが平衡点に届かないまま通っていないことを確かめる。
+    expect(sawEquilibrium).toBe(true);
   });
 
   it('掃けきってはじめて年齢も猶予も消える', () => {

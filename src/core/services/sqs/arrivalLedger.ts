@@ -139,10 +139,12 @@ export class ArrivalLedger {
     const head = nodes[0] as LedgerNode;
     // 捨てた領域を指されたら先頭で飽和させる（`cumulativeAt` と同じ作法）。
     // `prune` の不変条件により通常は到達しないが、ここは年齢が全面的に依存する場所なので、
-    // 万一崩れたときに**過去へ外挿して年齢が発散する**のではなく、控えめな値に倒れるようにする。
-    if (cumulative <= head.cumulative) return head.time;
-
-    const index = this.#segmentIndexByCumulative(cumulative);
+    // 万一崩れたときに**過去へ外挿して年齢が発散する**のを防ぐ。
+    //
+    // ⚠️ `head.time` を直接返さず、飽和させた値で通常の探索を通す。
+    // 先頭の区間が平坦（到着の無い空白）だった場合、`head.time` は空白の**始まり**なので
+    // 年齢が空白の長さぶん過大になる。探索を通せば空白の明けた時刻が返る。
+    const index = this.#segmentIndexByCumulative(Math.max(cumulative, head.cumulative));
     const from = nodes[index] as LedgerNode;
     // 末端に張り付いた（＝まだ到着していない件数を聞かれた）場合。
     if (index === nodes.length - 1) return from.time;

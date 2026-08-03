@@ -279,6 +279,8 @@ describe('SqsQueue — 年齢の伸びる速さは実測する', () => {
   });
 
   it('⚠️ 到着を 0 にしても伸び続ける — 決めているのは「当時の」到着レート', () => {
+    // 成立条件は「先頭が、消化レートを上回るレートで積まれた層に居ること」。
+    // 無条件の法則ではない（下のテストが反例を押さえている）。
     const queue = matchedCapacityQueue();
     run(queue, 500, 100);
     const tick = run(queue, 0, 5);
@@ -286,6 +288,20 @@ describe('SqsQueue — 年齢の伸びる速さは実測する', () => {
     // 先頭が過負荷の層 (500 件/秒) に居る限り、いまの到着が 0 でも 0.2 秒/秒 のまま。
     expect(tick.enqueuedMessagesPerSec).toBe(0);
     expect(tick.oldestMessageAgeGrowthPerSec).toBeCloseTo(0.2, 6);
+  });
+
+  it('⚠️ 先頭が薄い層まで進むと、掃けきる前でも縮み始める', () => {
+    // 「送信を止めれば伸び続ける」を無条件の法則として書くと、これが反例になる。
+    // 500 の層を抜けて 380 の層（容量 400 を下回る）へ入った瞬間に符号が変わる。
+    const queue = matchedCapacityQueue();
+    run(queue, 500, 100);
+    run(queue, 380, 60);
+    // 残 8,800 件を 400 件/秒 で 15 秒ぶんだけ削る（掃けきる前で止める）。
+    const tick = run(queue, 0, 15);
+
+    expect(tick.queueDepth).toBeGreaterThan(0); // まだ掃けきっていない
+    expect(tick.oldestMessageAgeGrowthPerSec).toBeCloseTo(1 - 400 / 380, 6);
+    expect(tick.oldestMessageAgeGrowthPerSec).toBeLessThan(0);
   });
 
   it('掃けきってはじめて 0 に戻る', () => {

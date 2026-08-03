@@ -4,7 +4,11 @@ import {
   SQS_DEFAULT_RETENTION_SECONDS,
   SQS_MAX_IN_FLIGHT_MESSAGES,
 } from '../../services/sqs/limits.js';
-import { SqsQueue, type SqsQueueTickResult } from '../../services/sqs/queue.js';
+import {
+  SqsQueue,
+  type SqsQueueConfig,
+  type SqsQueueTickResult,
+} from '../../services/sqs/queue.js';
 
 /**
  * インタラクティブに動かすときのキュー設定。
@@ -123,10 +127,15 @@ export interface SqsSessionSnapshot {
   /**
    * 最初のメッセージが黙って消えるまでの秒数。**エラー無しでデータを失うまでの猶予**。
    *
-   * すでに消え始めているか、年齢が伸びていない（＝掃けている）なら `undefined`。
+   * すでに消え始めているか、**最古の年齢が伸びていない**なら `undefined`。
    *
-   * ⚠️ こちらも外挿である。最古の年齢が伸びる速さは
-   * 「1 − 消化 ÷ 到着」で、いまのレートが続く前提で残り時間を割っている。
+   * ⚠️ 「年齢が伸びていない」は「バックログが減っている」ではない。
+   * バックログが減っている最中でも年齢は伸び続けることがあり、そのとき猶予は出続ける
+   * （負荷を安全域へ下げた直後がまさにそれ）。この 2 つを同一視すると、
+   * 実際は消失へ向かっているのに警報だけが消える。
+   *
+   * ⚠️ こちらも外挿である。残り時間は**実測した**年齢の伸びる速さで割っている
+   * （閉じた式で近似してはいけない理由は `oldestMessageAgeGrowthPerSec` を参照）。
    */
   readonly secondsUntilFirstExpiry: number | undefined;
 }
@@ -203,7 +212,10 @@ export class SqsLiveSession {
     // 使い捨ての queue を 1 つ作って検証を代行させるのは、検証規則を
     // ここに書き写さないためである（書き写すと必ず片方だけ緩む）。
     // これは検証専用で、バックログを持つ本体は差し替えない。
-    buildQueue(next);
+    //
+    // 設定 → 諸元の写し取りが `toQueueConfig` の 1 箇所しかないので、
+    // `SqsLiveSettings` に項目が増えたとき「検証だけ古い」ことは起こらない。
+    new SqsQueue(toQueueConfig(next));
 
     this.#queue.processingTimeMs = next.processingTimeMs ?? SQS_DEFAULT_PROCESSING_TIME_MS;
     this.#queue.consumerCount = next.consumerCount;
@@ -310,6 +322,21 @@ function secondsToDrain(queue: SqsQueue, latest: SqsQueueTickResult | undefined)
 }
 
 /**
+ * 「年齢が伸びている」と見なす下限 (秒/秒)。
+ *
+ * ⚠️ **これが無いと、平衡点で猶予の表示が「約 200 万年」に化ける。**
+ *
+ * 伸びる速さは前 tick との差で実測しているので、年齢が止まっている状態では
+ * **ほぼ等しい 2 数の引き算**になり、桁落ちで ±5e-13 程度の揺れが出る。
+ * それを `0 / 揺れ` ではなく `残り 40 秒 / 5e-13` として割ると 6e+13 秒が出る。
+ * しかも符号が揺れるので、HUD は「—」と天文学的な数字を数フレームおきに往復する。
+ *
+ * ⚠️ 揺れの振幅は tick 幅に反比例する（差を dt で割るため）。
+ * tick を細かくするほど大きくなるので、この下限は tick 幅より先に決めてはいけない。
+ */
+const AGE_GROWTH_EPSILON = 1e-6;
+
+/**
  * 最初のメッセージが黙って消えるまでの秒数。
  *
  * 保持期間までの残りを、**実測した年齢の伸びる速さ**で割る。
@@ -326,16 +353,26 @@ function secondsUntilFirstExpiry(
   latest: SqsQueueTickResult | undefined,
 ): number | undefined {
   if (latest === undefined || latest.expiredMessagesPerSec > 0) return undefined;
-  if (latest.oldestMessageAgeGrowthPerSec <= 0) return undefined;
+  if (latest.oldestMessageAgeGrowthPerSec < AGE_GROWTH_EPSILON) return undefined;
 
   const remaining = queue.messageRetentionSeconds - latest.oldestMessageAgeSeconds;
   return Math.max(0, remaining) / latest.oldestMessageAgeGrowthPerSec;
 }
 
-function buildQueue(settings: SqsLiveSettings): SqsQueue {
-  return new SqsQueue({
+/**
+ * 設定を queue の諸元へ写し取る。**写し取りはここ 1 箇所だけ**。
+ *
+ * 構築（`replace`）と検証（`update`）が同じ関数を通るので、
+ * `SqsLiveSettings` に項目が増えたときに「検証だけ古い」状態が生まれない。
+ */
+function toQueueConfig(settings: SqsLiveSettings): SqsQueueConfig {
+  return {
     consumerCount: settings.consumerCount,
     processingTimeMs: settings.processingTimeMs,
     messageRetentionSeconds: settings.messageRetentionSeconds,
-  });
+  };
+}
+
+function buildQueue(settings: SqsLiveSettings): SqsQueue {
+  return new SqsQueue(toQueueConfig(settings));
 }
