@@ -4,6 +4,7 @@ import {
   auroraSilentSlowdown,
   defaultTerrariumPreset,
   findTerrariumPreset,
+  sqsRetentionCliff,
   terrariumPresets,
   type TerrariumPreset,
 } from '../src/core/scenario/terrariumPresets.js';
@@ -23,6 +24,7 @@ function runPreset(preset: TerrariumPreset, seconds: number): TerrariumSnapshot[
     load: preset.load,
     dynamodb: preset.dynamodb,
     aurora: preset.aurora,
+    sqs: preset.sqs,
   });
   const timeline: TerrariumSnapshot[] = [];
   const frames = Math.round(seconds * 60);
@@ -41,12 +43,12 @@ function at(timeline: readonly TerrariumSnapshot[], seconds: number): TerrariumS
   return found;
 }
 
-describe('same-load-both（完了条件: スループットは同じなのにレイテンシだけ桁違い）', () => {
+describe('same-load-all（完了条件: スループットは同じなのにレイテンシだけ桁違い）', () => {
   const timeline = runPreset(defaultTerrariumPreset, 30);
 
   it('起動時に読み込まれるのはこのプリセットである', () => {
     // 最初の画面が看板でないと、完了条件は「操作すれば見える」に後退する。
-    expect(defaultTerrariumPreset.name).toBe('same-load-both');
+    expect(defaultTerrariumPreset.name).toBe('same-load-all');
   });
 
   it('両サービスの容量が揃っている（これが揃わないと対比が成立しない）', () => {
@@ -115,12 +117,55 @@ describe('aurora-silent-slowdown（完了条件: エラー 0 のままレイテ�
   });
 });
 
+describe('sqs-retention-cliff（完了条件: エラーを 1 件も出さずにメッセージが消える）', () => {
+  // 年齢が保持期間 60 秒に達するのは 300 秒後。早送りせずに素の tick で 400 秒ぶん回す。
+  const timeline = runPreset(sqsRetentionCliff, 400);
+
+  it('保持期間に達するまでは 1 件も消えない', () => {
+    const before = at(timeline, 280);
+    expect(before.sqs.expiredMessagesPerSec).toBe(0);
+    expect(before.sqs.oldestMessageAgeSeconds).toBeCloseTo(56, 0);
+    // 消え始める前から、猶予が数字として出ている。
+    expect(before.sqs.secondsUntilFirstExpiry).toBeCloseTo(20, 0);
+  });
+
+  it('保持期間に達した瞬間から消え始め、失った件数は戻らない', () => {
+    const after = at(timeline, 360);
+    expect(after.sqs.expiredMessagesPerSec).toBeGreaterThan(0);
+    expect(after.sqs.cumulativeExpired).toBeGreaterThan(0);
+    expect(after.sqs.retentionUtilization).toBeCloseTo(1, 2);
+  });
+
+  it('⚠️ 消えている最中も、他の指標はすべて健全なままである', () => {
+    const after = at(timeline, 360);
+
+    // producer は送信に成功し続けている。
+    expect(after.sqs.rejectedMessagesPerSec).toBe(0);
+    expect(after.sqs.enqueuedMessagesPerSec).toBeCloseTo(500, 6);
+    expect(after.sqs.sendLatencyMs).toBe(10);
+    // consumer も受信に成功し続けている。
+    expect(after.sqs.consumedMessagesPerSec).toBeCloseTo(400, 6);
+    // 誰も失敗していないのに、メッセージだけが無い。
+    expect(after.sqs.cumulativeExpired).toBeGreaterThan(1_000);
+  });
+
+  it('同じ負荷で DynamoDB と Aurora はとっくにエラーを出している', () => {
+    // 「SQS だけが静かである」ことが、この画面の主張そのもの。
+    const after = at(timeline, 360);
+    expect(after.dynamodb.write.throttledRequestsPerSec).toBeGreaterThan(0);
+    expect(after.aurora.rejectedRequestsPerSec).toBeGreaterThan(0);
+  });
+});
+
 describe('プリセット一覧', () => {
   it('M1 / M2 のシナリオも残っている（Aurora は既定のまま並走する）', () => {
     expect(terrariumPresets.length).toBeGreaterThan(2);
     for (const preset of terrariumPresets) {
       expect(findTerrariumPreset(preset.name)).toBe(preset);
       expect(preset.aurora.instanceClass).toBeTruthy();
+      // SQS の欄を足し忘れたプリセットは driver を構築した瞬間に落ちるが、
+      // 落ちる場所が「そのプリセットを選んだとき」なので気づくのが遅い。
+      expect(preset.sqs.consumerCount).toBeGreaterThan(0);
     }
   });
 
