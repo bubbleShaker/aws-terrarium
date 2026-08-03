@@ -1,0 +1,67 @@
+name: CI & Deploy to GitHub Pages
+
+# main への push でビルドし、GitHub Pages に公開する。
+# PR では公開せず、検証（typecheck / test / build）だけ走らせる。
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch: # 手動実行も可能にする
+
+# 既定は読み取りのみ。書き込み権限は必要なジョブにだけ個別付与する（最小権限）。
+permissions:
+  contents: read
+
+concurrency:
+  group: pages
+  # 進行中のデプロイを中断すると公開が壊れうるので、キャンセルせず待たせる。
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      # Core / View の両方の tsconfig を検査する（npm run typecheck の中身）
+      - name: typecheck
+        run: npm run typecheck
+
+      - name: vitest (Core のシミュレーションモデル)
+        run: npm test
+
+      - name: build
+        run: npm run build
+
+      # Pages 用の tar を作る。main 以外では成果物を作らない。
+      - uses: actions/configure-pages@v5
+        if: github.ref == 'refs/heads/main'
+      - uses: actions/upload-pages-artifact@v3
+        if: github.ref == 'refs/heads/main'
+        with:
+          path: dist
+
+  deploy:
+    needs: build
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    # Pages への書き込みと OIDC はこのジョブにだけ与える。
+    # 第三者パッケージの postinstall が走る build ジョブには持たせない。
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
