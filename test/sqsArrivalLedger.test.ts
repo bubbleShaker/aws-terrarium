@@ -58,6 +58,22 @@ describe('ArrivalLedger — 累積到着量の折れ線', () => {
     expect(ledger.timeAtCumulative(150)).toBeCloseTo(before, 9);
   });
 
+  it('捨てた領域より前の件数を聞かれても、過去へ外挿しない', () => {
+    // `prune` の不変条件により通常は到達しないが、ここは年齢が全面的に依存する場所なので、
+    // 万一崩れたときに「年齢が発散する」のではなく控えめな値に倒れることを固定する。
+    // ⚠️ クランプを探索の引数にだけ掛けると補間の分子が負のまま残り、素通りする。
+    const ledger = new ArrivalLedger();
+    for (let i = 0; i < 30; i += 1) ledger.record(100, 0.1);
+    for (let i = 0; i < 10; i += 1) ledger.record(500, 0.1);
+    ledger.prune(300);
+
+    const head = ledger.timeAtCumulative(300);
+    expect(ledger.timeAtCumulative(0)).toBe(head);
+    expect(ledger.timeAtCumulative(-5_000)).toBe(head);
+    // 負の時刻（＝シミュレーション開始より前）は絶対に返さない。
+    expect(ledger.timeAtCumulative(-5_000)).toBeGreaterThanOrEqual(0);
+  });
+
   it('prune した過去を指す cumulativeAt は、捨てた時点の累計で飽和する', () => {
     const ledger = new ArrivalLedger();
     for (let i = 0; i < 20; i += 1) ledger.record(100, 0.1);

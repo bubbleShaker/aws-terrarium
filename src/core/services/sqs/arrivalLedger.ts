@@ -144,7 +144,12 @@ export class ArrivalLedger {
     // ⚠️ `head.time` を直接返さず、飽和させた値で通常の探索を通す。
     // 先頭の区間が平坦（到着の無い空白）だった場合、`head.time` は空白の**始まり**なので
     // 年齢が空白の長さぶん過大になる。探索を通せば空白の明けた時刻が返る。
-    const index = this.#segmentIndexByCumulative(Math.max(cumulative, head.cumulative));
+    //
+    // ⚠️ 飽和させた値は**探索と補間の両方**に使うこと。探索の引数にだけ掛けると、
+    // 補間の分子 `cumulative − from.cumulative` が負のまま残り、
+    // 過去へ外挿する（このガードが防ぐはずのものが、そのまま素通りする）。
+    const clamped = Math.max(cumulative, head.cumulative);
+    const index = this.#segmentIndexByCumulative(clamped);
     const from = nodes[index] as LedgerNode;
     // 末端に張り付いた（＝まだ到着していない件数を聞かれた）場合。
     if (index === nodes.length - 1) return from.time;
@@ -153,7 +158,7 @@ export class ArrivalLedger {
     const arrivals = to.cumulative - from.cumulative;
     // 到着が無かった区間。この件数が到着するのは次の区間の頭なので、区間の終端を返す。
     if (arrivals <= 0) return to.time;
-    return from.time + ((cumulative - from.cumulative) / arrivals) * (to.time - from.time);
+    return from.time + ((clamped - from.cumulative) / arrivals) * (to.time - from.time);
   }
 
   /**

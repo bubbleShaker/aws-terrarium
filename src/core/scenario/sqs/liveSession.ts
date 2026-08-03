@@ -213,8 +213,10 @@ export class SqsLiveSession {
     // ここに書き写さないためである（書き写すと必ず片方だけ緩む）。
     // これは検証専用で、バックログを持つ本体は差し替えない。
     //
-    // 設定 → 諸元の写し取りが `toQueueConfig` の 1 箇所しかないので、
-    // `SqsLiveSettings` に項目が増えたとき「検証だけ古い」ことは起こらない。
+    // 検証が見る諸元は `toQueueConfig` 経由なので、構築時と必ず同じ規則になる。
+    // ⚠️ ただし**適用側（下の 3 行）は手写しのまま**である。
+    // `SqsLiveSettings` に項目が増えたら、ここへ足すのを忘れると
+    // 「検証は通るのに反映されない」という静かな壊れ方をする。
     new SqsQueue(toQueueConfig(next));
 
     this.#queue.processingTimeMs = next.processingTimeMs ?? SQS_DEFAULT_PROCESSING_TIME_MS;
@@ -360,10 +362,11 @@ function secondsUntilFirstExpiry(
 }
 
 /**
- * 設定を queue の諸元へ写し取る。**写し取りはここ 1 箇所だけ**。
+ * 設定を queue の諸元へ写し取る。
  *
- * 構築（`replace`）と検証（`update`）が同じ関数を通るので、
+ * 構築（`replace`）と**検証**（`update`）が同じ関数を通るので、
  * `SqsLiveSettings` に項目が増えたときに「検証だけ古い」状態が生まれない。
+ * `update` の**適用**側は setter を手で呼んでいるので、そちらは別途の注意が要る。
  */
 function toQueueConfig(settings: SqsLiveSettings): SqsQueueConfig {
   return {
