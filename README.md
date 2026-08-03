@@ -8,6 +8,9 @@ AWS の主要サービスを**ブラウザ内エミュレータ**として再現
 
 実 AWS アカウントは不要。GitHub Pages で動く。
 
+**公開先: https://bubbleshaker.github.io/aws-terrarium/**
+（`main` への push で [deploy.yml](./.github/workflows/deploy.yml) が typecheck / test / build を通してから自動公開する）
+
 ## なぜエミュレータなのか
 
 「過度なトラフィックで DynamoDB と RDS の違いを体感したい」——

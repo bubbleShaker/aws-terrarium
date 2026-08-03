@@ -1,0 +1,76 @@
+name: CI & Deploy to GitHub Pages
+
+# main への push でビルドし、GitHub Pages に公開する。
+# PR では公開せず、検証（typecheck / test / build）だけ走らせる。
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch: # 手動実行も可能にする
+
+# 既定は読み取りのみ。書き込み権限は必要なジョブにだけ個別付与する（最小権限）。
+permissions:
+  contents: read
+
+# ref ごとに 1 本。PR は後発 push で古い run を潰してよいが、
+# main の run は潰さない（公開が飛ぶ）。
+# Pages のデプロイ自体の直列化は deploy ジョブ側の concurrency で行う。
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # 直後の npm ci で第三者パッケージの postinstall が走るので、
+          # GITHUB_TOKEN を .git/config に残さない。
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - run: npm ci
+
+      # Core / View の両方の tsconfig を検査する（npm run typecheck の中身）
+      - name: typecheck
+        run: npm run typecheck
+
+      - run: npm test
+
+      - run: npm run build
+
+      # Pages 用の tar を作る。main 以外では成果物を作らない。
+      # base は vite 側で './' に固定してあるので configure-pages は不要。
+      - uses: actions/upload-pages-artifact@v3
+        if: github.ref == 'refs/heads/main'
+        with:
+          path: dist
+
+  deploy:
+    needs: build
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Pages への書き込みと OIDC はこのジョブにだけ与える。
+    # 第三者パッケージの postinstall が走る build ジョブには持たせない。
+    permissions:
+      pages: write
+      id-token: write
+    # 公開は 1 本ずつ。進行中のデプロイを中断すると公開が壊れうるので待たせる。
+    concurrency:
+      group: pages
+      cancel-in-progress: false
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
