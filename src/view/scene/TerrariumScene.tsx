@@ -8,6 +8,8 @@ import {
   CAMERA_FOV_DEGREES,
   CAMERA_TARGET_HEIGHT,
   HEIGHT_AT_HARD_CAP,
+  distanceFromInitialCamera,
+  fogRange,
   gridWidth,
   initialCameraPosition,
   requestsPerParticle,
@@ -91,16 +93,20 @@ export function TerrariumScene({
     [extent],
   );
 
+  // ⚠️ 霧の範囲は決め打ちにしない。SQS を奥へ置いた時点で、
+  // 決め打ちの `[extent * 1.8, extent * 5]` では**3 つ目だけが 5 割方沈む**。
+  const [fogNear, fogFar] = fogRange(extent, distanceFromInitialCamera(extent, origins.sqs));
+
   return (
     <Canvas camera={camera} dpr={[1, 1.75]}>
       <color attach="background" args={['#080b12']} />
-      <fog attach="fog" args={['#080b12', extent * 1.8, extent * 5]} />
+      <fog attach="fog" args={['#080b12', fogNear, fogFar]} />
 
       <ambientLight intensity={0.55} />
       <directionalLight position={[6, 12, 8]} intensity={1.1} />
       <pointLight position={[-8, 6, -6]} intensity={0.5} color="#4f7fff" />
 
-      <LoadPipe dynamodb={origins.dynamodb} aurora={origins.aurora} />
+      <LoadPipe sites={[origins.dynamodb, origins.aurora, origins.sqs]} />
 
       <group position={[origins.dynamodb.x, 0, origins.dynamodb.z]}>
         {/* パーティション数が変わると柱の本数も並びも変わるので、作り直す。 */}

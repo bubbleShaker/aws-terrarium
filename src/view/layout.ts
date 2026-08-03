@@ -189,7 +189,124 @@ export function vcpuGatePositions(vcpu: number): number[] {
 }
 
 // ────────────────────────────────────────────────────────────────
-// 2 つの敷地を 1 つの空間へ並べる
+// SQS のレーン
+// ────────────────────────────────────────────────────────────────
+
+/**
+ * ⚠️ **Aurora の「席」を流用してはいけない**（M4-2 の壁 2）。
+ *
+ * 席が表しているのは `max_connections` という**有限の器**である。
+ * SQS のキューは無制限で、**器が無いことが主張そのもの**なので、
+ * 同じ縮尺 (`REQUESTS_PER_SEAT`) を当てるとバックログ 30,000 件で
+ * 待合室の一辺が 13.2（Aurora の 2.4 に対し 5.5 倍）になり、60 秒で隣の敷地へめり込む。
+ *
+ * 代わりに**奥へ流れる 1 本のレーン**で描く。
+ * consumer 側（列の先頭）を手前に固定し、尾だけが奥 (-z) へ伸びる:
+ *
+ * - 伸びるほどカメラから遠ざかるので、**どれだけ溜まっても画角を破らない**
+ * - 奥は霧なので、**端が無いこと**が形で出る（器が無い、を絵にする唯一の方法）
+ * - 期限切れで消えるのは**最古＝先頭**なので、消える瞬間は手前でよく見える
+ */
+
+/** レーンの幅。 */
+export const LANE_WIDTH = 1.6;
+/** consumer の設備（列の先頭に立つ窓口）の寸法。 */
+export const CONSUMER_BANK_WIDTH = 1.8;
+export const CONSUMER_BANK_DEPTH = 0.9;
+export const CONSUMER_BANK_HEIGHT = 0.7;
+
+/** この件数までは、レーンの長さがバックログに比例する。 */
+const LANE_LINEAR_LIMIT_MESSAGES = 1_000;
+/** 上の件数のときのレーンの長さ。 */
+const LANE_LENGTH_AT_LINEAR_LIMIT = 3;
+/**
+ * 上限超過ぶんの圧縮の強さ。`OVERFLOW_COMPRESSION` と同じ役割。
+ * 保持 4 日 × 500 q/s の理論上限 1.7 億件でも長さ 21 に収まる値にしてある。
+ */
+const LANE_OVERFLOW_COMPRESSION = 0.35;
+
+/**
+ * バックログ (件) をレーンの長さに変換する。
+ *
+ * **`columnHeight` と同じ語彙**を意図的に使っている —
+ * 一定量までは線形、超えた分は対数で圧縮する。
+ * 柱で既に覚えた読み方（「まっすぐ伸びている間は素直な量、
+ * 途中から伸び方が変わったら桁が違う」）をそのまま持ち込めるようにするため。
+ *
+ * ⚠️ ただし柱と違って**境目は「壁」ではない**。SQS の入口に壁は無いので、
+ * `LANE_LINEAR_LIMIT_MESSAGES` はただの目盛りの切り替え点であって、
+ * そこに基準面を張ってはいけない（張ると「ここが上限」という嘘になる）。
+ */
+export function backlogLaneLength(messages: number): number {
+  if (!Number.isFinite(messages) || messages <= 0) return 0;
+  const ratio = messages / LANE_LINEAR_LIMIT_MESSAGES;
+  if (ratio <= 1) return ratio * LANE_LENGTH_AT_LINEAR_LIMIT;
+  return LANE_LENGTH_AT_LINEAR_LIMIT * (1 + Math.log2(ratio) * LANE_OVERFLOW_COMPRESSION);
+}
+
+/**
+ * 最古メッセージの年齢を、**レーンとは直交する縦棒の高さ**に変換する。
+ *
+ * ## なぜ別の軸なのか
+ *
+ * M4 の看板は「**長さが減っているのに年齢は伸びる**」である
+ * （負荷を安全域へ下げた直後、先頭はまだ過負荷の層に居るので年齢は伸び続ける。
+ * PLAN.md「M4-1 の実装で分かったこと」1）。
+ * 年齢をレーンの長さや色に乗せると、この主役の現象が**同じ軸に潰れて消える**。
+ *
+ * ## なぜ保持期間に対する比なのか
+ *
+ * 100% で `HEIGHT_AT_HARD_CAP` — **DynamoDB の物理上限の基準面と同じ高さ**に壁が来る。
+ * 3 つの敷地で「この高さが壁」が揃う。
+ *
+ * ⚠️ ただし柱は突き抜けるが、この棒は**決して突き抜けない**。
+ * 年齢が保持期間を超えたメッセージはもう存在しないからである。
+ * 頭打ちになること自体が SQS の性質（壁に達したら、越えずに消える）。
+ */
+export function ageBarHeight(ageSeconds: number, retentionSeconds: number): number {
+  if (!Number.isFinite(ageSeconds) || ageSeconds <= 0) return 0;
+  if (!Number.isFinite(retentionSeconds) || retentionSeconds <= 0) return 0;
+  return Math.min(1, ageSeconds / retentionSeconds) * HEIGHT_AT_HARD_CAP;
+}
+
+/** 年齢の縦棒を立てる x。レーンの脇（列に重ねない）。 */
+export const AGE_BAR_OFFSET_X = LANE_WIDTH / 2 + 0.45;
+
+/** SQS の敷地の寸法。**敷地の原点は consumer の設備**（列の先頭）に置く。 */
+export interface SqsSiteMetrics {
+  readonly width: number;
+  /** 現在のバックログでのレーンの長さ。 */
+  readonly laneLength: number;
+  /** 列の先頭の z。consumer の設備のすぐ奥の面。**ここで捌かれ、ここで期限切れが起きる**。 */
+  readonly headZ: number;
+  /** 列の尾の z。バックログが伸びるほど奥 (-z) へ下がる。 */
+  readonly tailZ: number;
+  /** レーンの中心 z。 */
+  readonly laneZ: number;
+}
+
+/**
+ * SQS の敷地の寸法。**バックログの件数だけで決まる**。
+ *
+ * ⚠️ 消化レート (consumer 数) は一切入らない。キューに残っているのは
+ * 保持期間ぶんの到着量そのもので、**消化レートは 1 ミリも効かない**
+ * （PLAN.md「M4-1 の実装で分かったこと」2）。
+ * ここに consumer 数を混ぜると、その発見が絵の上で嘘になる。
+ */
+export function sqsSiteMetrics(backlogMessages: number): SqsSiteMetrics {
+  const laneLength = backlogLaneLength(backlogMessages);
+  const headZ = -CONSUMER_BANK_DEPTH / 2;
+  return {
+    width: Math.max(CONSUMER_BANK_WIDTH, LANE_WIDTH),
+    laneLength,
+    headZ,
+    tailZ: headZ - laneLength,
+    laneZ: headZ - laneLength / 2,
+  };
+}
+
+// ────────────────────────────────────────────────────────────────
+// 3 つの敷地を 1 つの空間へ並べる
 // ────────────────────────────────────────────────────────────────
 
 /** 敷地と敷地の間に空ける距離。ここをパイプの分岐が跨ぐ。 */
@@ -205,21 +322,63 @@ const SITE_GAP = 9;
 const MIN_TERRARIUM_EXTENT = 8;
 
 /**
- * DynamoDB と Aurora の敷地の中心。**原点を空けて左右に置く**。
+ * SQS の敷地を、手前の 2 敷地より奥へ引く距離。
+ *
+ * 手前の敷地の**奥行きの半分**を基準にしている。x 方向では既に十分離れているので
+ * （左右の敷地は `separation/2` だけ外に居る）、この距離が担っているのは
+ * 重なりの回避ではなく「**3 つが別々の場所として読める**」ことのほうである。
+ *
+ * ⚠️ 大きくしすぎると SQS がカメラから遠ざかって霧に沈む。
+ * ここを触ったら `fogRange` の検査（最奥の敷地が霧に沈まない）も必ず見ること。
+ */
+export function sqsSetback(partitionCount: number, maxConnections: number): number {
+  const frontHalfDepth = Math.max(
+    gridWidth(partitionCount) / 2,
+    auroraSiteMetrics(maxConnections).depth / 2,
+  );
+  return frontHalfDepth + CONSUMER_BANK_DEPTH / 2 + SQS_FRONT_CLEARANCE;
+}
+
+/** SQS の設備と、手前の 2 敷地の奥の縁との間に空ける距離。 */
+const SQS_FRONT_CLEARANCE = 1.5;
+
+/**
+ * 3 つの敷地の中心。**原点を空けて、左右と中央奥に置く**（弓なり配置）。
+ *
+ * ```
+ *               [SQS]        ← 中央奥 (-z)
+ *                  ╲
+ *    [DynamoDB] ─── ▮ ─── [Aurora]
+ *                 パイプ
+ * ```
  *
  * 原点を空けているのは、そこに負荷の源のパイプを立てるため。
- * 「1 本のパイプが 2 つへ分岐する」が空間として実在していることが、
+ * 「1 本のパイプが 3 つへ分岐する」が空間として実在していることが、
  * 「同じ負荷を流している」を HUD 上の約束事ではなく**目に見える事実**にしている
  * （PLAN.md「M3 の空間設計」1 の決め手そのもの）。
+ *
+ * ## なぜ 3 つ目を横一列に足さないのか（M4-2 の壁 1）
+ *
+ * カメラ距離は横と縦の厳しいほうから逆算しているが、**現状は全ケースで横が支配**している。
+ * 横一列にすると距離が 21.7 → 35.0（最大時 58.3）へ伸び、画面内の物が 6 割の大きさになって、
+ * M2 の「柱 1 本が赤熱する」も M3 の「席は空いていないのに床は赤い」も読めなくなる。
+ *
+ * 奥へ引けば**横幅が増えないのでカメラ距離は変わらない**。
+ * 三角配置も extent は小さいが、カメラの向き `[0.15, 0.32, 0.94]` がほぼ正面なので
+ * 3 つ目が真後ろに来て向きの変更を強いられ、「左に DynamoDB / 右に Aurora」が崩れる。
+ * 弓なりなら向きに触らずに済む。
  */
 export function siteOrigins(
   partitionCount: number,
   maxConnections: number,
-): { dynamodb: SitePosition; aurora: SitePosition } {
+): { dynamodb: SitePosition; aurora: SitePosition; sqs: SitePosition } {
   const separation = siteSeparation(partitionCount, maxConnections);
   return {
     dynamodb: { x: -separation / 2, z: 0 },
     aurora: { x: separation / 2, z: 0 },
+    // x=0 の地面付近は空いている（パイプは `SPLIT_HEIGHT` より上にしか無い）ので、
+    // 中央奥へ置いても手前の敷地に隠れない。
+    sqs: { x: 0, z: -sqsSetback(partitionCount, maxConnections) },
   };
 }
 
@@ -231,8 +390,13 @@ export function siteSeparation(partitionCount: number, maxConnections: number): 
 /**
  * 空間全体のおおよその半幅。カメラの初期距離を決めるのに使う。
  *
- * ⚠️ **両方が初期画角に収まる**ことが M3 の完了条件そのものである。
- * 片方が枠外にあると、そもそも並置になっていない。
+ * ⚠️ **3 つとも初期画角に収まる**ことが M3 / M4-2 の完了条件そのものである。
+ * 1 つでも枠外にあると、そもそも並置になっていない。
+ *
+ * ⚠️ **SQS はここに入らない**。x=0 に幅 1.8 で立っているだけなので、
+ * 左右の敷地の内側に完全に収まり、半幅を 1 ミリも押し広げない。
+ * それが弓なり配置を選んだ理由そのもの — 3 つ目を足してもカメラが引かない
+ * （`test/viewLayout.test.ts` がこの等式を固定している）。
  */
 export function terrariumExtent(partitionCount: number, maxConnections: number): number {
   const separation = siteSeparation(partitionCount, maxConnections);
@@ -299,8 +463,41 @@ export function initialCameraPosition(extent: number): [number, number, number] 
   ];
 }
 
+/** 初期カメラから、地面のその点までの距離。霧の範囲を決めるのに使う。 */
+export function distanceFromInitialCamera(extent: number, point: SitePosition): number {
+  const [x, y, z] = initialCameraPosition(extent);
+  return Math.hypot(x - point.x, y, z - point.z);
+}
+
+/**
+ * 最奥の敷地に許す霧の濃さ。これ以上沈むと 3 つ目が背景に溶ける。
+ * 手前の 2 敷地が受けている濃さ（およそ 0.15）と同じ桁に収まる値。
+ */
+const MAX_FOG_AT_FARTHEST_SITE = 0.25;
+
+/**
+ * 霧の範囲 `[かかり始める距離, 完全に沈む距離]`。
+ *
+ * ## なぜ計算で出すのか
+ *
+ * M3 までは `[extent * 1.8, extent * 5]` の決め打ちで足りていた。敷地が 2 つとも
+ * z=0 にあり、カメラからの距離がほぼ同じだったからである。
+ * SQS を奥へ置いた瞬間にこれが壊れ、**3 つ目だけが 5 割方霧に沈む**。
+ *
+ * かかり始める距離は据え置いて、**沈みきる距離だけを押し出す**。
+ * 手前 2 敷地の空気感（M2 / M3 の見た目）を変えずに、奥の敷地を掬い上げられる。
+ *
+ * ⚠️ レーンの尾が霧へ溶けるのは**狙いどおり**（「端が無い」を語るのは霧である）。
+ * ここで守っているのは尾ではなく、**先頭**（捌かれ、期限切れで消える場所）が読めること。
+ */
+export function fogRange(extent: number, farthestSiteDistance: number): [number, number] {
+  const near = extent * 1.8;
+  const beyond = Math.max(0, farthestSiteDistance - near);
+  return [near, Math.max(extent * 5, near + beyond / MAX_FOG_AT_FARTHEST_SITE)];
+}
+
 // ────────────────────────────────────────────────────────────────
-// 粒子の縮尺（両サービス共通）
+// 粒子の縮尺（全サービス共通）
 // ────────────────────────────────────────────────────────────────
 
 /** 1 サービスあたりに描く粒子の上限。両者に同じ予算を与える。 */
