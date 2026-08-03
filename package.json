@@ -6,6 +6,9 @@
   "description": "AWS の主要サービスをブラウザ内エミュレータで再現し、three.js 空間で負荷をかけて挙動を体感する学習アプリ",
   "license": "MIT",
   "author": "bubbleShaker",
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "dev": "vite",
     "build": "vite build",
