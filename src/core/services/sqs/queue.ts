@@ -68,6 +68,18 @@ export interface SqsQueueTickResult {
   readonly oldestMessageAgeSeconds: number;
   /** 最古の年齢 ÷ 保持期間。**1 に達した瞬間から黙って消え始める**。 */
   readonly retentionUtilization: number;
+  /**
+   * 最古の年齢が伸びる速さ (秒/秒)。負なら縮んでいる。
+   *
+   * ⚠️ **`1 − 消化 ÷ 到着` で計算してはいけない。** 正しい分母は
+   * 「**先頭が到着した当時の**到着レート」であって、いまのレートではない。
+   * 負荷を下げた直後にこれを取り違えると、実際は伸びているのに**符号が逆**になり、
+   * 「もう大丈夫」と読める値が出る — `ArrivalLedger` が近似を退けた理由そのものを
+   * 派生指標で復活させることになる。
+   *
+   * ここでは前 tick の年齢との差から**実測**している。近似がそもそも要らない。
+   */
+  readonly oldestMessageAgeGrowthPerSec: number;
 
   /**
    * producer から見た送信レイテンシ (秒)。**バックログが何件でも動かない**。
@@ -155,23 +167,25 @@ export class SqsQueue {
   #queue = 0;
   /** キューから出ていった累計件数（消化 + 保持期間切れ）。年齢の逆引きに使う。 */
   #departed = 0;
+  /** 直前 tick の最古メッセージの年齢。伸びる速さを**実測**するために持つ。 */
+  #previousAgeSeconds = 0;
   #cumulativeArrivals = 0;
   #cumulativeConsumed = 0;
   #cumulativeExpired = 0;
   #elapsedSeconds = 0;
 
   constructor(config: SqsQueueConfig) {
-    const processingTimeMs = config.processingTimeMs ?? SQS_DEFAULT_PROCESSING_TIME_MS;
     const sendLatencyMs = config.sendLatencyMs ?? SQS_DEFAULT_SEND_LATENCY_MS;
-    requirePositive(processingTimeMs, 'processingTimeMs');
     requirePositive(sendLatencyMs, 'sendLatencyMs');
-
-    this.#processingTimeSeconds = processingTimeMs / 1_000;
     this.#sendLatencySeconds = sendLatencyMs / 1_000;
-    // setter を通す。検証規則が 2 箇所に分かれると、片方だけ緩む（`AuroraWriter` と同じ作法）。
+
+    // すべて setter を通す。検証規則が 2 箇所に分かれると、片方だけ緩む
+    // （`AuroraWriter` と同じ作法）。初期化は TypeScript の確定代入を満たすためだけのもの。
+    this.#processingTimeSeconds = 0;
     this.#consumerCount = 0;
-    this.consumerCount = config.consumerCount;
     this.#retentionSeconds = SQS_DEFAULT_RETENTION_SECONDS;
+    this.processingTimeMs = config.processingTimeMs ?? SQS_DEFAULT_PROCESSING_TIME_MS;
+    this.consumerCount = config.consumerCount;
     this.messageRetentionSeconds = config.messageRetentionSeconds ?? SQS_DEFAULT_RETENTION_SECONDS;
   }
 
@@ -223,6 +237,17 @@ export class SqsQueue {
 
   get processingTimeSeconds(): number {
     return this.#processingTimeSeconds;
+  }
+
+  /**
+   * 1 件あたりの処理時間 (ms) を変える。**バックログは持ち越す**（consumer 数と同じ理由）。
+   *
+   * 「consumer を増やす」を許して「consumer のコードを速くする」を禁じる理由は無い。
+   * どちらも消化容量を上げる手であって、キューの中身には何の影響も無い。
+   */
+  set processingTimeMs(value: number) {
+    requirePositive(value, 'processingTimeMs');
+    this.#processingTimeSeconds = value / 1_000;
   }
 
   get sendLatencySeconds(): number {
@@ -313,6 +338,13 @@ export class SqsQueue {
       this.#queue > 0 ? this.#elapsedSeconds - this.#ledger.timeAtCumulative(this.#departed) : 0;
     this.#ledger.prune(this.#departed);
 
+    // 年齢の伸びる速さは**実測**する。閉じた式 `1 − 消化 ÷ 到着` は、
+    // 分母が「先頭が到着した当時の到着レート」でなければならないため、
+    // 負荷を変えた直後に符号ごと間違える。前 tick との差なら近似がそもそも要らない。
+    const oldestMessageAgeGrowthPerSec =
+      (oldestMessageAgeSeconds - this.#previousAgeSeconds) / dtSeconds;
+    this.#previousAgeSeconds = oldestMessageAgeSeconds;
+
     const capacityPerSec = this.capacityPerSec;
     const consumedPerSec = consumed / dtSeconds;
     const expiredPerSec = expired / dtSeconds;
@@ -322,15 +354,17 @@ export class SqsQueue {
     // いま送ったメッセージがキューから出るまでの時間。
     //
     // ⚠️ `Q ÷ 消化容量` と書いてはいけない。**前に並んでいる客は消化だけでなく
-    // 期限切れでも減る**ので、期限切れが起きている間は実際の待ち時間がそれより短くなる。
-    // 定常状態で確かめられる: 到着 500・消化 400・保持 60 秒なら Q は 30,000 で、
-    // `Q ÷ 400` は 75 秒 — 保持期間より長い。「60 秒で消える列に 75 秒並ぶ」という
-    // ありえない値になる。出ていく総レート (400 + 100) で割れば 60 秒に落ち着く。
+    // 期限切れでも減る**ので、実際の待ち時間はそれより短くなる。
+    //
+    // ⚠️ さらに保持期間で頭を押さえる必要がある。期限切れが**まだ始まっていない過渡状態**では
+    // 分母に期限切れ分が入らず、式が `Q ÷ 消化容量` へ退化するためである。
+    // 実際、保持 60 秒のプリセットで消え始める直前（t=300 秒）に 75 秒が出る —
+    // 「60 秒で消える列に 75 秒並ぶ」というありえない値。
+    // どんなメッセージも保持期間を超えて並ぶことはできないので、そこで打ち止めにする。
     const departureRatePerSec = consumedPerSec + expiredPerSec;
-    const endToEndLatencySeconds =
-      this.#queue > 0
-        ? this.#queue / departureRatePerSec + this.#processingTimeSeconds
-        : this.#processingTimeSeconds;
+    const waitSeconds =
+      this.#queue > 0 ? Math.min(this.#queue / departureRatePerSec, this.#retentionSeconds) : 0;
+    const endToEndLatencySeconds = waitSeconds + this.#processingTimeSeconds;
 
     return {
       timeSeconds: this.#elapsedSeconds,
@@ -348,6 +382,7 @@ export class SqsQueue {
 
       oldestMessageAgeSeconds,
       retentionUtilization: oldestMessageAgeSeconds / this.#retentionSeconds,
+      oldestMessageAgeGrowthPerSec,
 
       sendLatencySeconds: this.#sendLatencySeconds,
       endToEndLatencySeconds,

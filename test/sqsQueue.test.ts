@@ -233,6 +233,71 @@ describe('SqsQueue — 保持期間（エラーを伴わない唯一のデータ
     expect(tick.endToEndLatencySeconds).toBeCloseTo(60 + queue.processingTimeSeconds, 1);
   });
 
+  it('⚠️ まだ 1 件も消えていない過渡状態でも、待ち時間は保持期間を超えない', () => {
+    // ここを落としたのが実装当初のバグ。期限切れが始まる前は分母に期限切れ分が
+    // 入らないので、式が `Q ÷ 消化容量` へ退化する。消え始める直前
+    // （＝画面がいちばん盛り上がる瞬間）にちょうど 75 秒が出てしまう。
+    const queue = new SqsQueue({ consumerCount: 2, messageRetentionSeconds: 60 });
+    const tick = run(queue, 500, 300);
+
+    expect(tick.expiredMessagesPerSec).toBe(0);
+    expect(tick.queueDepth / queue.capacityPerSec).toBeGreaterThan(60);
+    expect(tick.endToEndLatencySeconds).toBeLessThanOrEqual(60 + queue.processingTimeSeconds);
+  });
+
+  it('消化がどれだけ遅くても、待ち時間が保持期間を超えることはない', () => {
+    const queue = new SqsQueue({
+      consumerCount: 1,
+      processingTimeMs: 1_000,
+      messageRetentionSeconds: 60,
+    });
+    const tick = run(queue, 500, 200);
+
+    // Q ÷ 消化容量 なら数万秒（保持 60 秒に対し十数時間）になる。
+    expect(tick.queueDepth / queue.capacityPerSec).toBeGreaterThan(10_000);
+    expect(tick.endToEndLatencySeconds).toBeLessThanOrEqual(60 + queue.processingTimeSeconds);
+  });
+});
+
+describe('SqsQueue — 年齢の伸びる速さは実測する', () => {
+  it('過負荷では「1 − 消化 ÷ 到着」に一致する', () => {
+    const queue = matchedCapacityQueue();
+    const tick = run(queue, 500, 100);
+    expect(tick.oldestMessageAgeGrowthPerSec).toBeCloseTo(0.2, 6);
+  });
+
+  it('⚠️ 負荷を安全域へ下げても符号が反転しない（閉じた式ならここで壊れる）', () => {
+    const queue = matchedCapacityQueue();
+    run(queue, 500, 100);
+
+    // 399 q/s は容量 400 を下回るので、閉じた式 `1 − 400/399` は**負**になる。
+    // 実際には先頭は置き去りにされたままなので、年齢は伸び続けている。
+    const tick = run(queue, 399, 5);
+    expect(1 - tick.consumedMessagesPerSec / tick.enqueuedMessagesPerSec).toBeLessThan(0);
+    expect(tick.oldestMessageAgeGrowthPerSec).toBeGreaterThan(0);
+    expect(tick.backlogGrowthPerSec).toBeLessThan(0);
+  });
+
+  it('⚠️ 到着を 0 にしても伸び続ける — 決めているのは「当時の」到着レート', () => {
+    const queue = matchedCapacityQueue();
+    run(queue, 500, 100);
+    const tick = run(queue, 0, 5);
+
+    // 先頭が過負荷の層 (500 件/秒) に居る限り、いまの到着が 0 でも 0.2 秒/秒 のまま。
+    expect(tick.enqueuedMessagesPerSec).toBe(0);
+    expect(tick.oldestMessageAgeGrowthPerSec).toBeCloseTo(0.2, 6);
+  });
+
+  it('掃けきってはじめて 0 に戻る', () => {
+    const queue = matchedCapacityQueue();
+    run(queue, 500, 100);
+    const tick = run(queue, 0, 30);
+
+    expect(tick.queueDepth).toBe(0);
+    expect(tick.oldestMessageAgeSeconds).toBe(0);
+    expect(tick.oldestMessageAgeGrowthPerSec).toBeLessThanOrEqual(0);
+  });
+
   it('消えた件数は「到着 − 消化 − 残存」と一致する（無から生み出していない）', () => {
     const queue = new SqsQueue({ consumerCount: 2, messageRetentionSeconds: 60 });
     run(queue, 500, 600);

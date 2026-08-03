@@ -9,8 +9,9 @@
  * しかし**それをやると SQS の看板が消える**。
  *
  * 過負荷を止めて負荷を安全域へ下げた瞬間、`Q / D` は減り始める。
- * ところが実際の最古メッセージは**依然として最古のまま**で、
- * その年齢は掃けきるまで **1 秒につき 1 秒ずつ伸び続ける**。
+ * ところが実際の最古メッセージの年齢は**伸び続ける**。
+ * 先頭に居るのは過負荷の最中に積まれた古い層で、
+ * 前の客が捌けても次に先頭へ来るのは**その隣の、同じくらい古いメッセージ**だからである。
  *
  * > 負荷はもう正常なのに、`ApproximateAgeOfOldestMessage` だけが伸び続ける。
  *
@@ -135,6 +136,12 @@ export class ArrivalLedger {
    */
   timeAtCumulative(cumulative: number): number {
     const nodes = this.#nodes;
+    const head = nodes[0] as LedgerNode;
+    // 捨てた領域を指されたら先頭で飽和させる（`cumulativeAt` と同じ作法）。
+    // `prune` の不変条件により通常は到達しないが、ここは年齢が全面的に依存する場所なので、
+    // 万一崩れたときに**過去へ外挿して年齢が発散する**のではなく、控えめな値に倒れるようにする。
+    if (cumulative <= head.cumulative) return head.time;
+
     const index = this.#segmentIndexByCumulative(cumulative);
     const from = nodes[index] as LedgerNode;
     // 末端に張り付いた（＝まだ到着していない件数を聞かれた）場合。

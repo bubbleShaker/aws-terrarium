@@ -92,6 +92,13 @@ export interface SqsSessionSnapshot {
   readonly oldestMessageAgeSeconds: number;
   /** 年齢 ÷ 保持期間。**1 に達した瞬間から黙って消え始める**。 */
   readonly retentionUtilization: number;
+  /**
+   * 年齢が伸びる速さ (秒/秒)。負なら縮んでいる。
+   *
+   * バックログが減っていても**これが正なら状況は悪化している** — 負荷を下げた直後に
+   * 起きる（先頭は先頭のまま置き去りにされる）。閉じた式では符号を間違えるため実測値。
+   */
+  readonly oldestMessageAgeGrowthPerSec: number;
 
   /** producer から見た送信レイテンシ (ms)。**バックログが何件でも動かない**。 */
   readonly sendLatencyMs: number;
@@ -186,18 +193,19 @@ export class SqsLiveSession {
   update(patch: Partial<SqsLiveSettings>): boolean {
     const next = { ...this.#settings, ...patch };
 
-    // ⚠️ 先に queue へ適用してから設定を差し替える。順序が逆だと、
-    // 不正値で setter が例外を投げたときに「設定は新しいのに queue は古い」状態で
-    // 固定される（`AuroraLiveSession` と同じ手当て）。
+    // ⚠️ **全項目をまとめて検証してから、まとめて適用する。**
     //
-    // 処理時間だけは構築時に確定させてあるので、変えるには作り直しが要る。
-    // ここでは無視せず例外にする — 黙って効かないほうが遥かに危険である。
-    const nextProcessingTimeMs = next.processingTimeMs ?? SQS_DEFAULT_PROCESSING_TIME_MS;
-    if (nextProcessingTimeMs !== this.#queue.processingTimeSeconds * 1_000) {
-      throw new RangeError(
-        'processingTimeMs は update() では変えられない（バックログを保つため）。replace() を使うこと',
-      );
-    }
+    // 1 項目ずつ setter へ流すと、途中の項目が例外を投げたときに
+    // 「consumer 数だけ新しく、保持期間は古く、`settings` はどちらでもない」状態で固定される。
+    // このとき `snapshot()` は queue 由来、ControlPanel は `settings` 由来なので
+    // **同じ画面が違う数字を出す** — このプロジェクトが繰り返し潰してきた乖離そのもの。
+    //
+    // 使い捨ての queue を 1 つ作って検証を代行させるのは、検証規則を
+    // ここに書き写さないためである（書き写すと必ず片方だけ緩む）。
+    // これは検証専用で、バックログを持つ本体は差し替えない。
+    buildQueue(next);
+
+    this.#queue.processingTimeMs = next.processingTimeMs ?? SQS_DEFAULT_PROCESSING_TIME_MS;
     this.#queue.consumerCount = next.consumerCount;
     this.#queue.messageRetentionSeconds = next.messageRetentionSeconds ?? SQS_DEFAULT_RETENTION_SECONDS;
     this.#settings = next;
@@ -276,6 +284,7 @@ export class SqsLiveSession {
 
       oldestMessageAgeSeconds: latest?.oldestMessageAgeSeconds ?? 0,
       retentionUtilization: latest?.retentionUtilization ?? 0,
+      oldestMessageAgeGrowthPerSec: latest?.oldestMessageAgeGrowthPerSec ?? 0,
 
       sendLatencyMs: queue.sendLatencySeconds * 1_000,
       endToEndLatencyMs: (latest?.endToEndLatencySeconds ?? 0) * 1_000,
@@ -303,22 +312,24 @@ function secondsToDrain(queue: SqsQueue, latest: SqsQueueTickResult | undefined)
 /**
  * 最初のメッセージが黙って消えるまでの秒数。
  *
- * 最古の年齢が伸びる速さは「1 − 消化 ÷ 到着」である
- * （到着が消化を上回るぶんだけ、先頭が置き去りにされていく）。
- * 保持期間までの残りをこれで割る。**すでに消え始めているなら猶予は無い**ので undefined。
+ * 保持期間までの残りを、**実測した年齢の伸びる速さ**で割る。
+ * **すでに消え始めているなら猶予は無い**ので undefined。
+ *
+ * ⚠️ ここで `1 − 消化 ÷ 到着` という閉じた式を使ってはいけない。
+ * 正しい分母は「**先頭が到着した当時の**到着レート」であって、いまのレートではない。
+ * 取り違えると、負荷を安全域へ下げた直後に**符号が逆**になる —
+ * 年齢は実際には伸び続けているのに、警報が消えて「もう大丈夫」に見える。
+ * `ArrivalLedger` が近似を退けた理由そのものを、派生指標で復活させることになる。
  */
 function secondsUntilFirstExpiry(
   queue: SqsQueue,
   latest: SqsQueueTickResult | undefined,
 ): number | undefined {
   if (latest === undefined || latest.expiredMessagesPerSec > 0) return undefined;
-  if (latest.enqueuedMessagesPerSec <= 0) return undefined;
-
-  const ageGrowthPerSec = 1 - latest.consumedMessagesPerSec / latest.enqueuedMessagesPerSec;
-  if (ageGrowthPerSec <= 0) return undefined;
+  if (latest.oldestMessageAgeGrowthPerSec <= 0) return undefined;
 
   const remaining = queue.messageRetentionSeconds - latest.oldestMessageAgeSeconds;
-  return Math.max(0, remaining) / ageGrowthPerSec;
+  return Math.max(0, remaining) / latest.oldestMessageAgeGrowthPerSec;
 }
 
 function buildQueue(settings: SqsLiveSettings): SqsQueue {

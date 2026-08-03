@@ -70,14 +70,6 @@ describe('SqsLiveSession — 設定変更でバックログを失わない（Aur
     expect(after.expiredMessagesPerSec).toBeGreaterThan(0);
   });
 
-  it('処理時間を update() で変えようとしたら、黙って無視せず例外にする', () => {
-    const session = new SqsLiveSession(defaultSqsLiveSettings);
-    expect(() => session.update({ processingTimeMs: 20 })).toThrow(RangeError);
-    // 例外のあとも設定と queue は一致したままでなければならない。
-    expect(session.snapshot().processingTimeMs).toBe(5);
-    expect(session.settings.processingTimeMs).toBeUndefined();
-  });
-
   it('replace() はバックログごと初期状態へ戻す（プリセットの役目）', () => {
     const session = new SqsLiveSession(defaultSqsLiveSettings);
     run(session, 500, 120);
@@ -141,13 +133,79 @@ describe('SqsLiveSession — 教材の主張を担う数字', () => {
     expect(snapshot.secondsUntilFirstExpiry).toBeCloseTo(200, 0);
   });
 
-  it('掃けている間は「消えるまでの猶予」を出さない', () => {
+  it('⚠️ バックログが減っていても、年齢が伸びている限り猶予を出し続ける', () => {
+    // ここが M4 でいちばん壊しやすい 1 点。
+    // 「掃け始めたら安全」と考えて猶予を消すと、実際には消失へ向かっているのに
+    // 警報だけが消える。閉じた式 `1 − 消化 ÷ 到着` はまさにそう振る舞う
+    // （分母が「先頭が到着した当時のレート」でなければならないため符号ごと間違える）。
+    const session = new SqsLiveSession({ consumerCount: 2, messageRetentionSeconds: 60 });
+    run(session, 500, 275);
+    const overloaded = session.snapshot();
+    expect(overloaded.oldestMessageAgeSeconds).toBeCloseTo(55, 0);
+
+    // 399 q/s は容量 400 を下回る安全域。バックログは減り始める。
+    const draining = run(session, 399, 1);
+    expect(draining.backlogGrowthPerSec).toBeLessThan(0);
+    expect(draining.secondsToDrain).toBeGreaterThan(0);
+
+    // それでも年齢は伸び続けており、このままなら消失に至る。
+    expect(draining.oldestMessageAgeGrowthPerSec).toBeGreaterThan(0);
+    expect(draining.secondsUntilFirstExpiry).toBeDefined();
+    expect(draining.secondsUntilFirstExpiry).toBeCloseTo(24, 0);
+
+    // 予告どおり、25 秒後には本当に消え始める。
+    const expiring = run(session, 399, 30);
+    expect(expiring.expiredMessagesPerSec).toBeGreaterThan(0);
+  });
+
+  it('⚠️ 送信を完全に止めても、掃けきるまで年齢は伸び続ける', () => {
+    // 年齢が伸びる速さを決めているのは「**先頭が到着した当時の**到着レート」なので、
+    // いま 1 件も送っていなくても、先頭が過負荷の層に居る限り伸び続ける。
+    // 「送信を止めたのだから、あとは待てばよい」が通じない — 保持期間が先に来ることがある。
     const session = new SqsLiveSession({ consumerCount: 2, messageRetentionSeconds: 60 });
     run(session, 500, 100);
-    const snapshot = run(session, 100, 1);
+    const stopped = run(session, 0, 5);
 
-    expect(snapshot.secondsUntilFirstExpiry).toBeUndefined();
-    expect(snapshot.secondsToDrain).toBeGreaterThan(0);
+    expect(stopped.enqueuedMessagesPerSec).toBe(0);
+    expect(stopped.oldestMessageAgeGrowthPerSec).toBeGreaterThan(0);
+    expect(stopped.secondsUntilFirstExpiry).toBeDefined();
+  });
+
+  it('掃けきってはじめて年齢も猶予も消える', () => {
+    const session = new SqsLiveSession({ consumerCount: 2, messageRetentionSeconds: 60 });
+    run(session, 500, 100);
+    // 10,010 件を 400 件/秒で掃くのに 25 秒。
+    const drained = run(session, 0, 30);
+
+    expect(drained.queueDepth).toBe(0);
+    expect(drained.oldestMessageAgeSeconds).toBe(0);
+    expect(drained.secondsUntilFirstExpiry).toBeUndefined();
+  });
+
+  it('処理時間を速くしてもバックログは持ち越す（consumer 数と同じ扱い）', () => {
+    const session = new SqsLiveSession(defaultSqsLiveSettings);
+    run(session, 500, 120);
+    const before = session.snapshot();
+
+    // 「consumer を増やす」を許して「consumer のコードを速くする」を禁じる理由は無い。
+    expect(session.update({ processingTimeMs: 1 })).toBe(false);
+    const after = session.snapshot();
+    expect(after.queueDepth).toBe(before.queueDepth);
+    expect(after.capacityPerSec).toBe(2_000);
+  });
+
+  it('update() が途中で失敗しても、設定と queue が食い違わない', () => {
+    const session = new SqsLiveSession(defaultSqsLiveSettings);
+
+    // 保持期間が下限割れなので失敗する。consumer 数だけ適用されて残ってはいけない。
+    expect(() => session.update({ consumerCount: 8, messageRetentionSeconds: 10 })).toThrow(
+      RangeError,
+    );
+
+    const snapshot = session.snapshot();
+    expect(snapshot.consumerCount).toBe(2);
+    expect(session.settings.consumerCount).toBe(2);
+    expect(snapshot.consumerCount).toBe(session.queue.consumerCount);
   });
 
   it('スナップショットは設定ではなく queue に効いている値を返す', () => {
