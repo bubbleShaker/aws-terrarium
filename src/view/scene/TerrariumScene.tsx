@@ -8,6 +8,8 @@ import {
   CAMERA_FOV_DEGREES,
   CAMERA_TARGET_HEIGHT,
   HEIGHT_AT_HARD_CAP,
+  distanceFromInitialCamera,
+  fogRange,
   gridWidth,
   initialCameraPosition,
   requestsPerParticle,
@@ -36,27 +38,32 @@ interface TerrariumSceneProps {
  * テラリウムの中身。ここから下は Core の状態を読んで描くだけで、
  * シミュレーションのロジックは一切持たない。
  *
- * ## 1 つの空間に 2 つ置く
+ * ## 1 つの空間に 3 つ置く（弓なり配置）
  *
  * ```
- *              [源] ← 負荷ダイヤルは 1 本
- *                │
- *         ┌──────┴──────┐
- *         ▼             ▼
- *   ▓▓ ██ ▓▓ ▓▓      ╔═════╗ writer
- *   ▓▓ ▓▓ ▓▓ ▓▓      ╚═════╝
- *     ✦  ✦            ∷∷∷∷∷ ← 待合室
- *   頂上で赤く散る     手前で詰まる
+ *                  [源] ← 負荷ダイヤルは 1 本
+ *                    │
+ *          ┌─────────┼─────────┐
+ *          ▼         ▼         ▼
+ *                 ════▓▓▓▓░░···→  ← SQS は中央奥。列だけが伸びる
+ *    ▓▓ ██ ▓▓            ╔═════╗ writer
+ *    ▓▓ ▓▓ ▓▓            ╚═════╝
+ *      ✦  ✦               ∷∷∷∷∷ ← 待合室
+ *   頂上で赤く散る        手前で詰まる     何も起きない
  * ```
  *
- * 左右分割の別シーンにしていないのは、**負荷の源を 1 本のパイプとして実在させる**ため
+ * 分割した別シーンにしていないのは、**負荷の源を 1 本のパイプとして実在させる**ため
  * （PLAN.md「M3 の空間設計」1）。調査で受理量も拒否量も完全に一致すると分かった以上、
  * 「同じ負荷を流している」が HUD 上の約束事でしかないと主張全体が崩れる。
  *
+ * 3 つ目を横一列ではなく**中央奥**へ置いたのは、横幅を増やさない唯一の置き方だから
+ * （横一列にするとカメラが 1.6 倍引き、M2 / M3 の見どころが読めなくなる。
+ * PLAN.md「M4-2 の壁 1」）。
+ *
  * ## 粒子の縮尺は 1 箇所で決める
  *
- * `requestsPerParticle` をここで 1 回だけ計算して両方へ配る。
- * サービスごとに計算させると、片方だけ式を変えたときに静かにずれる —
+ * `requestsPerParticle` をここで 1 回だけ計算して全サービスへ配る。
+ * サービスごとに計算させると、1 つだけ式を変えたときに静かにずれる —
  * しかも症状は「同じ負荷なのに流れの太さが違う」なので、
  * バグではなく発見に見えてしまう（時計を 1 本にしたのと同じ理由）。
  */
@@ -91,16 +98,20 @@ export function TerrariumScene({
     [extent],
   );
 
+  // ⚠️ 霧の範囲は決め打ちにしない。SQS を奥へ置いた時点で、
+  // 決め打ちの `[extent * 1.8, extent * 5]` では**3 つ目だけが 5 割方沈む**。
+  const [fogNear, fogFar] = fogRange(extent, distanceFromInitialCamera(extent, origins.sqs));
+
   return (
     <Canvas camera={camera} dpr={[1, 1.75]}>
       <color attach="background" args={['#080b12']} />
-      <fog attach="fog" args={['#080b12', extent * 1.8, extent * 5]} />
+      <fog attach="fog" args={['#080b12', fogNear, fogFar]} />
 
       <ambientLight intensity={0.55} />
       <directionalLight position={[6, 12, 8]} intensity={1.1} />
       <pointLight position={[-8, 6, -6]} intensity={0.5} color="#4f7fff" />
 
-      <LoadPipe dynamodb={origins.dynamodb} aurora={origins.aurora} />
+      <LoadPipe sites={[origins.dynamodb, origins.aurora, origins.sqs]} />
 
       <group position={[origins.dynamodb.x, 0, origins.dynamodb.z]}>
         {/* パーティション数が変わると柱の本数も並びも変わるので、作り直す。 */}

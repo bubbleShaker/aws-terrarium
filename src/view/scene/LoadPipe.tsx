@@ -5,36 +5,42 @@ import type { SitePosition } from '../layout.js';
 import { PIPE_TOP, SOURCE_HEIGHT, SPLIT_HEIGHT } from '../layout.js';
 
 interface LoadPipeProps {
-  readonly dynamodb: SitePosition;
-  readonly aurora: SitePosition;
+  /** 分岐の行き先。**サービスを足したらここへ 1 つ増やすだけ**でよい。 */
+  readonly sites: readonly SitePosition[];
 }
 
 /**
- * 負荷の源。**1 本のパイプが 2 つへ分岐する**。
+ * 負荷の源。**1 本のパイプが全サービスへ分岐する**。
  *
  * ## なぜこれを実在させるのか
  *
  * M3 の主張は「同じ負荷を流したのに、レイテンシだけが 500 倍になる」である。
+ * M4 ではそこへ「SQS だけは何も起きないまま溜まる」が乗る。
  * 調査で受理量も拒否量も完全に一致すると分かった以上、
  * **「同じ負荷を流している」が疑われた時点で主張全体が崩れる**。
  *
  * HUD に「負荷ダイヤルは 1 本です」と書くのは約束事にすぎない。
- * 1 本のパイプが目の前で 2 股に分かれていれば、それは見れば分かる事実になる。
+ * 1 本のパイプが目の前で分かれていれば、それは見れば分かる事実になる。
  * 左右分割の別シーンにしなかったのはこのためである（PLAN.md「M3 の空間設計」1）。
  *
  * ここは Core の状態を一切読まない純粋な構造物である。
  * 流れている量は粒子が語るので、パイプは「経路が 1 本であること」だけを担当する。
  */
-export function LoadPipe({ dynamodb, aurora }: LoadPipeProps): JSX.Element {
-  // 分岐は曲線で描く。直角に折ると 2 本の別の管に見えて、
-  // 「1 本が分かれた」ではなく「もともと 2 本あった」に読めてしまう。
-  //
+export function LoadPipe({ sites }: LoadPipeProps): JSX.Element {
   // ⚠️ 依存はオブジェクトではなく**座標の数値**で取る。`siteOrigins()` は
   // 毎レンダー新しいオブジェクトを返すので、参照で見ると HUD の更新 (10Hz) のたびに
   // 曲線と tubeGeometry を作り直すことになる。
+  // 本数が可変になったので、1 本のキーに畳んでいる。
+  // ⚠️ 座標を手で書き出さず `JSON.stringify` にしているのは、`SitePosition` に
+  // 欄が増えた日に**キーだけが古いまま**にならないようにするため
+  // （形は変わったのにキーが同じ ＝ 更新されない、という静かな腐り方をする）。
+  const shapeKey = JSON.stringify(sites);
+
+  // 分岐は曲線で描く。直角に折ると別々の管に見えて、
+  // 「1 本が分かれた」ではなく「もともと何本もあった」に読めてしまう。
   const branches = useMemo(
     () =>
-      [dynamodb, aurora].map((site) =>
+      sites.map((site) =>
         new CatmullRomCurve3([
           new Vector3(0, SPLIT_HEIGHT, 0),
           new Vector3(site.x * 0.35, SPLIT_HEIGHT - 0.1, site.z * 0.35),
@@ -43,7 +49,7 @@ export function LoadPipe({ dynamodb, aurora }: LoadPipeProps): JSX.Element {
         ]),
       ),
     // eslint-disable-next-line react-hooks/exhaustive-deps -- 座標の値だけが形を決める
-    [dynamodb.x, dynamodb.z, aurora.x, aurora.z],
+    [shapeKey],
   );
 
   return (

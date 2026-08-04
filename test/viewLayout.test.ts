@@ -1,27 +1,38 @@
 import { describe, expect, it } from 'vitest';
 import {
+  AGE_BAR_OFFSET_X,
   CAMERA_FOV_DEGREES,
   CAMERA_TARGET_HEIGHT,
   COLUMN_SPACING,
+  CONSUMER_BANK_DEPTH,
+  CONSUMER_BANK_WIDTH,
   VISIBLE_WIDTH_FRACTION,
   HEIGHT_AT_HARD_CAP,
+  LANE_WIDTH,
   PIPE_TOP,
   PARTICLE_BUDGET,
   REQUESTS_PER_SEAT,
   SEAT_SPACING,
+  ageBarHeight,
   auroraSiteMetrics,
+  backlogLaneLength,
   columnHeight,
   damp,
+  distanceFromInitialCamera,
+  fogRange,
   gridExtent,
   gridPositions,
   gridWidth,
   initialCameraPosition,
   particleCount,
   requestsPerParticle,
+  roomWidth,
   seatCount,
   seatPositions,
   siteOrigins,
   siteSeparation,
+  sqsSetback,
+  sqsSiteMetrics,
   terrariumExtent,
   vcpuGatePositions,
 } from '../src/view/layout.js';
@@ -276,10 +287,11 @@ describe('auroraSiteMetrics / seatPositions / vcpuGatePositions', () => {
 });
 
 /**
- * 2 つの敷地の配置。
+ * 左右 2 敷地の配置（M3 から変えていない部分）。
  *
- * **両方が初期画角に収まる**ことは M3 の完了条件そのものである。
- * 片方が枠の外にあると、そもそも並置になっていない。
+ * **どれも初期画角に収まる**ことは M3 / M4-2 の完了条件そのものである。
+ * 1 つでも枠の外にあると、そもそも並置になっていない。
+ * 3 つ目（SQS・中央奥）の検査は `siteOrigins（3 敷地・弓なり配置）` にある。
  */
 describe('siteOrigins / terrariumExtent', () => {
   it('原点を空けて左右に置く（そこに負荷のパイプが立つ）', () => {
@@ -347,6 +359,314 @@ describe('siteOrigins / terrariumExtent', () => {
 
   it('席の間隔より敷地の余白のほうが広い（待合室が隣の柱にめり込まない）', () => {
     expect(siteSeparation(1, 1_000)).toBeGreaterThan(SEAT_SPACING * 4);
+  });
+});
+
+/**
+ * SQS のレーン。
+ *
+ * ここが M4-2 の山場である。**「無制限であること」と「絵として収まること」の両立**を
+ * 担っているのがこの 2 つの関数で、どちらが壊れても
+ * 「SQS は溜めるだけで何も起きない」という主張が絵の上で嘘になる。
+ */
+describe('backlogLaneLength', () => {
+  it('少ない件数では、ほぼ件数に比例する', () => {
+    // 膝の手前では素直な量として読める（10 件と 20 件の差が倍に見える）。
+    expect(backlogLaneLength(20) / backlogLaneLength(10)).toBeGreaterThan(1.9);
+    expect(backlogLaneLength(20) / backlogLaneLength(10)).toBeLessThan(2.0);
+  });
+
+  it('⚠️ どこにも折れ目が無い — 柱と決定的に違うところ', () => {
+    // `columnHeight` は物理上限で**わざと折る**。折れ目が壁の在り処を語るからである。
+    // SQS に壁は無いので、折れ目があると「ここで何かが起きた」という嘘の読みが生まれる。
+    //
+    // 線形と対数を継いだ実装だと、境目で傾きが半分に跳ねる（比 0.5）。
+    // 滑らかな 1 本の曲線なら、標本を 5% 刻みで取る限り比は 0.95 を下回らない。
+    let previousSlope = 0;
+    let worstRatio = 1;
+    for (let backlog = 1; backlog < 1e9; backlog *= 1.05) {
+      const next = backlog * 1.05;
+      const slope = (backlogLaneLength(next) - backlogLaneLength(backlog)) / (next - backlog);
+      if (previousSlope > 0) worstRatio = Math.min(worstRatio, slope / previousSlope);
+      previousSlope = slope;
+    }
+    expect(worstRatio).toBeGreaterThan(0.9);
+  });
+
+  it('どこまで溜めても単調に伸びる（頭打ちにしない）', () => {
+    // ⚠️ クランプしてはいけない。頭打ちにした瞬間、レーンは「有限の器」に化けて
+    // Aurora の待合室と同じものになり、SQS の主張（入口に壁が無い）が消える。
+    let previous = -1;
+    for (let backlog = 1; backlog <= 1e9; backlog *= 2) {
+      const length = backlogLaneLength(backlog);
+      expect(length).toBeGreaterThan(previous);
+      previous = length;
+    }
+  });
+
+  it('保持 4 日の理論上限 (1.7 億件) でも絵に収まる長さで止まる', () => {
+    // 500 q/s × 4 日 = 172,800,000 件。ここまで対数で潰しておかないと
+    // レーンが地平線を突き抜けて、そもそも 1 本の列に見えなくなる。
+    expect(backlogLaneLength(172_800_000)).toBeLessThan(25);
+  });
+
+  it('⚠️ Aurora の席を流用したときの破綻を避けられている', () => {
+    // PLAN.md「M4-2 の壁 2」の実測そのもの。`sqs-retention-cliff` の定常 30,000 件を
+    // 席 (REQUESTS_PER_SEAT) の縮尺で描くと一辺 13.2 になり、Aurora の待合室 (2.4) の
+    // 5.5 倍に膨れて隣の敷地へめり込む。
+    const asSeats = roomWidth(30_000);
+    expect(asSeats).toBeGreaterThan(13);
+    expect(asSeats).toBeGreaterThan(roomWidth(1_000) * 5);
+
+    // レーンなら、同じ 30,000 件が Aurora の敷地の幅と同じ桁に収まる。
+    expect(backlogLaneLength(30_000)).toBeLessThan(asSeats);
+    expect(backlogLaneLength(30_000)).toBeLessThan(siteSeparation(1, 1_000));
+  });
+
+  it('0 件や不正値では 0（レーンが現れない）', () => {
+    expect(backlogLaneLength(0)).toBe(0);
+    expect(backlogLaneLength(-1)).toBe(0);
+    expect(backlogLaneLength(Number.NaN)).toBe(0);
+  });
+});
+
+describe('ageBarHeight', () => {
+  it('保持期間に対する比で伸びる', () => {
+    expect(ageBarHeight(30, 60)).toBeCloseTo(HEIGHT_AT_HARD_CAP / 2, 10);
+    expect(ageBarHeight(15, 60)).toBeCloseTo(HEIGHT_AT_HARD_CAP / 4, 10);
+  });
+
+  it('保持期間ちょうどで、DynamoDB の物理上限の基準面と同じ高さになる', () => {
+    // 3 つの敷地で「この高さが壁」が揃う。柱の基準面と同じ高さに壁を置くのはそのため。
+    expect(ageBarHeight(60, 60)).toBe(HEIGHT_AT_HARD_CAP);
+    expect(ageBarHeight(4 * 24 * 3_600, 4 * 24 * 3_600)).toBe(HEIGHT_AT_HARD_CAP);
+  });
+
+  it('⚠️ 柱と違って決して突き抜けない', () => {
+    // 年齢が保持期間を超えたメッセージはもう存在しない。
+    // 突き抜けさせると「壁を越えて生き残っているもの」を描くことになる。
+    expect(ageBarHeight(600, 60)).toBe(HEIGHT_AT_HARD_CAP);
+    expect(ageBarHeight(60 * 1_000, 60)).toBe(HEIGHT_AT_HARD_CAP);
+  });
+
+  it('年齢 0 や不正値では 0（棒が現れない）', () => {
+    expect(ageBarHeight(0, 60)).toBe(0);
+    expect(ageBarHeight(-1, 60)).toBe(0);
+    expect(ageBarHeight(30, 0)).toBe(0);
+    expect(ageBarHeight(Number.NaN, 60)).toBe(0);
+    // ⚠️ Infinity は「壁いっぱい」ではなく 0 に倒す。モジュール全体の作法
+    // (`columnHeight` / `backlogLaneLength`) と揃えてある — 描かないほうが安全側。
+    expect(ageBarHeight(Number.POSITIVE_INFINITY, 60)).toBe(0);
+  });
+
+  it('⚠️ M4 の看板 — 列が縮んでいる最中に、年齢の棒は伸びる', () => {
+    // これを 1 つの軸に乗せると主役の現象が消えるので、2 つの軸に分けている。
+    // ここでは Core を実際に回して、**同じ瞬間に長さが減り高さが増える**ことを固定する。
+    //
+    // 保持期間を 300 秒にしているのは、この 120 秒の窓で期限切れを起こさないため
+    // （消え始めると長さが減る理由が 2 つに増えて、何を見ているのか分からなくなる）。
+    const driver = new TerrariumDriver({
+      load: { readsPerSecond: 0, writesPerSecond: 500 },
+      dynamodb: sameLoadEverywhere.dynamodb,
+      aurora: sameLoadEverywhere.aurora,
+      sqs: { consumerCount: 2, messageRetentionSeconds: 300 },
+    });
+
+    // 過負荷 500 q/s（容量 400）で 100 秒。先頭は「500 で積まれた層」に居る。
+    for (let frame = 0; frame < 100 * 60; frame += 1) driver.advance(1 / 60);
+    const retention = driver.snapshot().sqs.messageRetentionSeconds;
+    const peak = driver.snapshot().sqs;
+    expect(peak.backlogGrowthPerSec).toBeGreaterThan(0);
+
+    // 安全域へ落とす。ここから列は縮み始める。
+    driver.setLoad({ writesPerSecond: 300 });
+    for (let frame = 0; frame < 20 * 60; frame += 1) driver.advance(1 / 60);
+    const recovering = driver.snapshot().sqs;
+
+    // 長さは減っている。
+    expect(recovering.queueDepth).toBeLessThan(peak.queueDepth);
+    expect(backlogLaneLength(recovering.queueDepth)).toBeLessThan(
+      backlogLaneLength(peak.queueDepth),
+    );
+
+    // それなのに年齢の棒は伸びている — 先頭がまだ過負荷の層を抜けていないため。
+    expect(recovering.oldestMessageAgeSeconds).toBeGreaterThan(peak.oldestMessageAgeSeconds);
+    expect(ageBarHeight(recovering.oldestMessageAgeSeconds, retention)).toBeGreaterThan(
+      ageBarHeight(peak.oldestMessageAgeSeconds, retention),
+    );
+  });
+});
+
+describe('sqsSiteMetrics', () => {
+  it('列は先頭 (consumer 側) が手前で、尾が奥へ伸びる', () => {
+    const metrics = sqsSiteMetrics(6_000);
+    // 手前 (+z 寄り) が先頭。ここで捌かれ、ここで期限切れが起きる。
+    expect(metrics.headZ).toBeGreaterThan(metrics.tailZ);
+    // 尾は奥 (-z)。伸びるほどカメラから遠ざかるので、画角を破らない。
+    expect(metrics.tailZ).toBeLessThan(0);
+    expect(metrics.laneZ).toBeLessThan(metrics.headZ);
+    expect(metrics.laneZ).toBeGreaterThan(metrics.tailZ);
+  });
+
+  it('溜まるほど尾だけが奥へ下がる（先頭は動かない）', () => {
+    const small = sqsSiteMetrics(1_000);
+    const large = sqsSiteMetrics(100_000);
+    expect(large.headZ).toBe(small.headZ);
+    expect(large.tailZ).toBeLessThan(small.tailZ);
+  });
+
+  it('0 件なら長さ 0 で、先頭と尾が重なる', () => {
+    const empty = sqsSiteMetrics(0);
+    expect(empty.laneLength).toBe(0);
+    expect(empty.tailZ).toBe(empty.headZ);
+  });
+
+  it('年齢の棒はレーンの外に立つ（列に重ならない）', () => {
+    expect(AGE_BAR_OFFSET_X).toBeGreaterThan(LANE_WIDTH / 2);
+  });
+});
+
+/**
+ * 3 つの敷地の配置（弓なり）。
+ *
+ * **3 つとも初期画角に収まる**ことが M4-2 の完了条件そのものである。
+ */
+describe('siteOrigins（3 敷地・弓なり配置）', () => {
+  it('SQS は中央奥に立つ（左右は M3 のまま）', () => {
+    const origins = siteOrigins(50, 1_000);
+    expect(origins.dynamodb.x).toBeLessThan(0);
+    expect(origins.aurora.x).toBeGreaterThan(0);
+    // x=0 の地面付近は空いている。ここへ引き込むから横幅が増えない。
+    expect(origins.sqs.x).toBe(0);
+    expect(origins.sqs.z).toBeLessThan(0);
+    expect(origins.dynamodb.z).toBe(0);
+    expect(origins.aurora.z).toBe(0);
+  });
+
+  it('⚠️ 3 つ目を足してもカメラが引かない — 弓なりを選んだ理由そのもの', () => {
+    // PLAN.md「M4-2 の壁 1」の実測: 横一列にすると既定で 21.7 → 35.0 まで引き、
+    // 画面内の物が 6 割の大きさになって M2 / M3 の見どころが読めなくなる。
+    //
+    // ⚠️ 「SQS が画角に収まっている」を見ても意味が無い（x=0 なので常に真になる）。
+    // 固定すべきなのは **`terrariumExtent` が SQS に 1 ミリも押し広げられていない**
+    // という等式のほうで、それは M3 時点の式を横に置いて突き合わせないと言えない。
+    const twoSiteExtent = (partitions: number, maxConnections: number): number =>
+      Math.max(
+        8, // MIN_TERRARIUM_EXTENT
+        siteSeparation(partitions, maxConnections) / 2 +
+          Math.max(gridWidth(partitions), auroraSiteMetrics(maxConnections).width) / 2,
+      );
+
+    for (const partitions of [1, 4, 25, 50]) {
+      for (const maxConnections of [90, 1_000, 4_000, 5_000]) {
+        expect(terrariumExtent(partitions, maxConnections)).toBe(
+          twoSiteExtent(partitions, maxConnections),
+        );
+      }
+    }
+
+    // 既定プリセット相当での実測値。PLAN.md の表の「2 敷地（現状）」と同じ数字。
+    const extent = terrariumExtent(1, 1_000);
+    expect(extent).toBeCloseTo(8, 10);
+    const [x, y, z] = initialCameraPosition(extent);
+    expect(Math.hypot(x, y - CAMERA_TARGET_HEIGHT, z)).toBeCloseTo(21.7, 1);
+  });
+
+  it('3 つの敷地がどれも重ならない', () => {
+    for (const partitions of [1, 4, 25, 50]) {
+      for (const maxConnections of [90, 1_000, 4_000, 5_000]) {
+        const origins = siteOrigins(partitions, maxConnections);
+        const ddbHalfWidth = gridWidth(partitions) / 2;
+        const auroraHalfWidth = auroraSiteMetrics(maxConnections).width / 2;
+        // ⚠️ 定数を直書きせず、敷地が申告する幅を使う。年齢の縦棒まで含んだ
+        // 実際の箱で見ないと、M4-2b で棒を描いた瞬間に検査の外側へ出る。
+        const sqsHalfWidth = sqsSiteMetrics(0).width / 2;
+        expect(sqsHalfWidth).toBeGreaterThan(CONSUMER_BANK_WIDTH / 2);
+        expect(sqsHalfWidth).toBeGreaterThan(AGE_BAR_OFFSET_X);
+
+        // 左右どうし（M3 から変わっていない）。
+        expect(siteSeparation(partitions, maxConnections)).toBeGreaterThan(
+          ddbHalfWidth + auroraHalfWidth,
+        );
+
+        // SQS と左右。x 方向だけで分離できていること — z の奥行きに頼ると、
+        // レーンが伸びたときに横から回り込んで隣へ食い込む。
+        expect(Math.abs(origins.dynamodb.x)).toBeGreaterThan(ddbHalfWidth + sqsHalfWidth);
+        expect(Math.abs(origins.aurora.x)).toBeGreaterThan(auroraHalfWidth + sqsHalfWidth);
+      }
+    }
+  });
+
+  it('原点を空けたままである（そこに負荷のパイプが立つ）', () => {
+    for (const partitions of [1, 25, 50]) {
+      for (const maxConnections of [90, 1_000, 5_000]) {
+        const origins = siteOrigins(partitions, maxConnections);
+        // SQS の設備でいちばん手前の面（consumer 側の前面）が、原点に届かない。
+        const nearestFaceZ = origins.sqs.z + CONSUMER_BANK_DEPTH / 2;
+        expect(nearestFaceZ).toBeLessThan(0);
+        // 手前 2 敷地の奥の縁より、さらに奥に居る。
+        expect(sqsSetback(partitions, maxConnections)).toBeGreaterThan(gridWidth(partitions) / 2);
+      }
+    }
+  });
+
+  it('レーンがどれだけ伸びても、原点へ向かって伸びない', () => {
+    // 尾は必ず奥 (-z) へ下がる。手前へ伸ばすと原点のパイプを飲み込み、
+    // 「1 本の負荷が分岐する」が見えなくなる。
+    const origins = siteOrigins(1, 1_000);
+    for (const backlog of [1_000, 30_000, 172_800_000]) {
+      expect(origins.sqs.z + sqsSiteMetrics(backlog).tailZ).toBeLessThan(origins.sqs.z);
+    }
+  });
+});
+
+describe('fogRange', () => {
+  it('いちばん奥の敷地が霧に沈まない', () => {
+    // ⚠️ M3 までの決め打ち `[extent * 1.8, extent * 5]` は、敷地が 2 つとも z=0 に
+    // あることに依存していた。SQS を奥へ置いた瞬間に 3 つ目だけが 5 割方沈む。
+    for (const partitions of [1, 25, 50]) {
+      for (const maxConnections of [90, 1_000, 5_000]) {
+        const extent = terrariumExtent(partitions, maxConnections);
+        const origins = siteOrigins(partitions, maxConnections);
+        const distance = distanceFromInitialCamera(extent, origins.sqs);
+        const [near, far] = fogRange(extent, distance);
+
+        expect(far).toBeGreaterThan(near);
+        const fogAtSqs = (distance - near) / (far - near);
+        expect(fogAtSqs).toBeLessThanOrEqual(0.25 + 1e-9);
+
+        // 手前の 2 敷地の空気感は残す（霧を殺すのではなく、奥だけを掬い上げる）。
+        const frontDistance = distanceFromInitialCamera(extent, origins.dynamodb);
+        expect((frontDistance - near) / (far - near)).toBeGreaterThan(0);
+      }
+    }
+  });
+
+  it('かかり始める距離は M3 から動かさない', () => {
+    const extent = terrariumExtent(1, 1_000);
+    const [near] = fogRange(extent, distanceFromInitialCamera(extent, { x: 0, z: -4 }));
+    expect(near).toBeCloseTo(extent * 1.8, 10);
+  });
+
+  it('敷地が近ければ M3 と同じ範囲のまま', () => {
+    const extent = terrariumExtent(1, 1_000);
+    expect(fogRange(extent, 0)).toEqual([extent * 1.8, extent * 5]);
+  });
+
+  it('不正値でも有限の範囲を返す（fog が壊れるとシーン全体が飛ぶ）', () => {
+    // ⚠️ ここだけは「0 に倒す」では済まない。near === far の霧は補間が 0 除算になる。
+    for (const [extent, distance] of [
+      [8, Number.NaN],
+      [Number.NaN, 10],
+      [0, 10],
+      [-1, 10],
+      [8, Number.POSITIVE_INFINITY],
+    ]) {
+      const [near, far] = fogRange(extent as number, distance as number);
+      expect(Number.isFinite(near)).toBe(true);
+      expect(Number.isFinite(far)).toBe(true);
+      expect(far).toBeGreaterThan(near);
+    }
   });
 });
 
