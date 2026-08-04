@@ -6,6 +6,7 @@ import {
   COLUMN_SPACING,
   CONSUMER_BANK_DEPTH,
   CONSUMER_BANK_WIDTH,
+  GROUND_CELL_SIZE,
   VISIBLE_WIDTH_FRACTION,
   HEIGHT_AT_HARD_CAP,
   LANE_WIDTH,
@@ -23,6 +24,7 @@ import {
   gridExtent,
   gridPositions,
   gridWidth,
+  groundGrid,
   initialCameraPosition,
   particleCount,
   requestsPerParticle,
@@ -616,6 +618,69 @@ describe('siteOrigins（3 敷地・弓なり配置）', () => {
     const origins = siteOrigins(1, 1_000);
     for (const backlog of [1_000, 30_000, 172_800_000]) {
       expect(origins.sqs.z + sqsSiteMetrics(backlog).tailZ).toBeLessThan(origins.sqs.z);
+    }
+  });
+});
+
+/**
+ * 地面のグリッド。
+ *
+ * M4-2a の申し送り 2 — レーンが地面の外へ出る — への回答である。
+ * 背景の話に見えるが、**列だけが虚空に浮いていたら「溜まっている」が場所として読めない**。
+ */
+describe('groundGrid', () => {
+  it('マス目の一辺は広げても動かない（空間の縮尺が変わって見えないこと）', () => {
+    for (const partitions of [1, 25, 50]) {
+      for (const maxConnections of [90, 1_000, 5_000]) {
+        const extent = terrariumExtent(partitions, maxConnections);
+        const grid = groundGrid(extent, sqsSetback(partitions, maxConnections));
+        expect(grid.size / grid.divisions).toBeCloseTo(GROUND_CELL_SIZE, 10);
+        expect(Number.isInteger(grid.divisions)).toBe(true);
+      }
+    }
+  });
+
+  it('⚠️ M4-2a の決め打ち (extent * 3) では 30,000 件のレーンが地面から出ていた', () => {
+    // 回帰の記録。`sqs-retention-cliff` の定常がちょうどここに当たる
+    // （画面がいちばん盛り上がる瞬間に、列だけが虚空へ伸びていく）。
+    const extent = terrariumExtent(1, 1_000);
+    const setback = sqsSetback(1, 1_000);
+    const tailZ = setback + backlogLaneLength(30_000);
+
+    expect(tailZ).toBeGreaterThan((extent * 3) / 2);
+    expect(tailZ).toBeLessThan(groundGrid(extent, setback).size / 2);
+  });
+
+  it('どんなバックログでもレーンの尾が地面に載る', () => {
+    for (const partitions of [1, 25, 50]) {
+      for (const maxConnections of [90, 1_000, 5_000]) {
+        const extent = terrariumExtent(partitions, maxConnections);
+        const setback = sqsSetback(partitions, maxConnections);
+        const halfSpan = groundGrid(extent, setback).size / 2;
+
+        // 1 兆件 — 負荷上限 60,000 件/秒を保持上限 14 日ぶん積んでも届かない量。
+        for (const backlog of [1_000, 30_000, 172_800_000, 1e12]) {
+          expect(setback + backlogLaneLength(backlog)).toBeLessThanOrEqual(halfSpan);
+        }
+      }
+    }
+  });
+
+  it('手前 2 敷地の周りにも余白が残る', () => {
+    // レーンだけを基準にすると、パーティション 50 本のテーブルで
+    // 地面が敷地ぴったりになり、柱が崖の縁に立つ。
+    for (const partitions of [1, 25, 50]) {
+      const extent = terrariumExtent(partitions, 5_000);
+      const grid = groundGrid(extent, sqsSetback(partitions, 5_000));
+      expect(grid.size / 2).toBeGreaterThan(extent);
+    }
+  });
+
+  it('不正値でも地面が消えない', () => {
+    // ⚠️ ここが 0 になると、シーンから地面ごと消える。
+    for (const grid of [groundGrid(Number.NaN, 3), groundGrid(8, Number.NaN), groundGrid(-1, -1)]) {
+      expect(grid.size).toBeGreaterThan(0);
+      expect(grid.divisions).toBeGreaterThan(0);
     }
   });
 });
