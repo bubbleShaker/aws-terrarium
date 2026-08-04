@@ -30,8 +30,11 @@ export function LoadPipe({ sites }: LoadPipeProps): JSX.Element {
   // ⚠️ 依存はオブジェクトではなく**座標の数値**で取る。`siteOrigins()` は
   // 毎レンダー新しいオブジェクトを返すので、参照で見ると HUD の更新 (10Hz) のたびに
   // 曲線と tubeGeometry を作り直すことになる。
-  // 本数が可変になったので、数値を並べた 1 本のキーに畳んでいる。
-  const shapeKey = sites.map((site) => `${site.x},${site.z}`).join('|');
+  // 本数が可変になったので、1 本のキーに畳んでいる。
+  // ⚠️ 座標を手で書き出さず `JSON.stringify` にしているのは、`SitePosition` に
+  // 欄が増えた日に**キーだけが古いまま**にならないようにするため
+  // （形は変わったのにキーが同じ ＝ 更新されない、という静かな腐り方をする）。
+  const shapeKey = JSON.stringify(sites);
 
   // 分岐は曲線で描く。直角に折ると別々の管に見えて、
   // 「1 本が分かれた」ではなく「もともと何本もあった」に読めてしまう。

@@ -287,10 +287,11 @@ describe('auroraSiteMetrics / seatPositions / vcpuGatePositions', () => {
 });
 
 /**
- * 2 つの敷地の配置。
+ * 左右 2 敷地の配置（M3 から変えていない部分）。
  *
- * **両方が初期画角に収まる**ことは M3 の完了条件そのものである。
- * 片方が枠の外にあると、そもそも並置になっていない。
+ * **どれも初期画角に収まる**ことは M3 / M4-2 の完了条件そのものである。
+ * 1 つでも枠の外にあると、そもそも並置になっていない。
+ * 3 つ目（SQS・中央奥）の検査は `siteOrigins（3 敷地・弓なり配置）` にある。
  */
 describe('siteOrigins / terrariumExtent', () => {
   it('原点を空けて左右に置く（そこに負荷のパイプが立つ）', () => {
@@ -369,14 +370,27 @@ describe('siteOrigins / terrariumExtent', () => {
  * 「SQS は溜めるだけで何も起きない」という主張が絵の上で嘘になる。
  */
 describe('backlogLaneLength', () => {
-  it('一定量までは件数に比例する', () => {
-    expect(backlogLaneLength(1_000)).toBeCloseTo(3, 10);
-    expect(backlogLaneLength(500)).toBeCloseTo(backlogLaneLength(1_000) / 2, 10);
-    expect(backlogLaneLength(100)).toBeCloseTo(backlogLaneLength(1_000) / 10, 10);
+  it('少ない件数では、ほぼ件数に比例する', () => {
+    // 膝の手前では素直な量として読める（10 件と 20 件の差が倍に見える）。
+    expect(backlogLaneLength(20) / backlogLaneLength(10)).toBeGreaterThan(1.9);
+    expect(backlogLaneLength(20) / backlogLaneLength(10)).toBeLessThan(2.0);
   });
 
-  it('目盛りの切り替え点で不連続にならない', () => {
-    expect(backlogLaneLength(999.999)).toBeCloseTo(backlogLaneLength(1_000.001), 4);
+  it('⚠️ どこにも折れ目が無い — 柱と決定的に違うところ', () => {
+    // `columnHeight` は物理上限で**わざと折る**。折れ目が壁の在り処を語るからである。
+    // SQS に壁は無いので、折れ目があると「ここで何かが起きた」という嘘の読みが生まれる。
+    //
+    // 線形と対数を継いだ実装だと、境目で傾きが半分に跳ねる（比 0.5）。
+    // 滑らかな 1 本の曲線なら、標本を 5% 刻みで取る限り比は 0.95 を下回らない。
+    let previousSlope = 0;
+    let worstRatio = 1;
+    for (let backlog = 1; backlog < 1e9; backlog *= 1.05) {
+      const next = backlog * 1.05;
+      const slope = (backlogLaneLength(next) - backlogLaneLength(backlog)) / (next - backlog);
+      if (previousSlope > 0) worstRatio = Math.min(worstRatio, slope / previousSlope);
+      previousSlope = slope;
+    }
+    expect(worstRatio).toBeGreaterThan(0.9);
   });
 
   it('どこまで溜めても単調に伸びる（頭打ちにしない）', () => {
@@ -532,18 +546,26 @@ describe('siteOrigins（3 敷地・弓なり配置）', () => {
   it('⚠️ 3 つ目を足してもカメラが引かない — 弓なりを選んだ理由そのもの', () => {
     // PLAN.md「M4-2 の壁 1」の実測: 横一列にすると既定で 21.7 → 35.0 まで引き、
     // 画面内の物が 6 割の大きさになって M2 / M3 の見どころが読めなくなる。
-    for (const partitions of [1, 25, 50]) {
-      for (const maxConnections of [90, 1_000, 5_000]) {
-        const extent = terrariumExtent(partitions, maxConnections);
-        const origins = siteOrigins(partitions, maxConnections);
+    //
+    // ⚠️ 「SQS が画角に収まっている」を見ても意味が無い（x=0 なので常に真になる）。
+    // 固定すべきなのは **`terrariumExtent` が SQS に 1 ミリも押し広げられていない**
+    // という等式のほうで、それは M3 時点の式を横に置いて突き合わせないと言えない。
+    const twoSiteExtent = (partitions: number, maxConnections: number): number =>
+      Math.max(
+        8, // MIN_TERRARIUM_EXTENT
+        siteSeparation(partitions, maxConnections) / 2 +
+          Math.max(gridWidth(partitions), auroraSiteMetrics(maxConnections).width) / 2,
+      );
 
-        // SQS の敷地が、左右の敷地が決めた半幅の内側へ完全に収まっている。
-        // ここが破れた瞬間に extent が押し広げられ、カメラが引き始める。
-        expect(Math.abs(origins.sqs.x) + CONSUMER_BANK_WIDTH / 2).toBeLessThan(extent);
+    for (const partitions of [1, 4, 25, 50]) {
+      for (const maxConnections of [90, 1_000, 4_000, 5_000]) {
+        expect(terrariumExtent(partitions, maxConnections)).toBe(
+          twoSiteExtent(partitions, maxConnections),
+        );
       }
     }
 
-    // 既定プリセット相当での実測値。2 敷地時の 8.00 / 21.7 から 1 ミリも動いていない。
+    // 既定プリセット相当での実測値。PLAN.md の表の「2 敷地（現状）」と同じ数字。
     const extent = terrariumExtent(1, 1_000);
     expect(extent).toBeCloseTo(8, 10);
     const [x, y, z] = initialCameraPosition(extent);
@@ -556,7 +578,11 @@ describe('siteOrigins（3 敷地・弓なり配置）', () => {
         const origins = siteOrigins(partitions, maxConnections);
         const ddbHalfWidth = gridWidth(partitions) / 2;
         const auroraHalfWidth = auroraSiteMetrics(maxConnections).width / 2;
-        const sqsHalfWidth = CONSUMER_BANK_WIDTH / 2;
+        // ⚠️ 定数を直書きせず、敷地が申告する幅を使う。年齢の縦棒まで含んだ
+        // 実際の箱で見ないと、M4-2b で棒を描いた瞬間に検査の外側へ出る。
+        const sqsHalfWidth = sqsSiteMetrics(0).width / 2;
+        expect(sqsHalfWidth).toBeGreaterThan(CONSUMER_BANK_WIDTH / 2);
+        expect(sqsHalfWidth).toBeGreaterThan(AGE_BAR_OFFSET_X);
 
         // 左右どうし（M3 から変わっていない）。
         expect(siteSeparation(partitions, maxConnections)).toBeGreaterThan(
@@ -625,6 +651,22 @@ describe('fogRange', () => {
   it('敷地が近ければ M3 と同じ範囲のまま', () => {
     const extent = terrariumExtent(1, 1_000);
     expect(fogRange(extent, 0)).toEqual([extent * 1.8, extent * 5]);
+  });
+
+  it('不正値でも有限の範囲を返す（fog が壊れるとシーン全体が飛ぶ）', () => {
+    // ⚠️ ここだけは「0 に倒す」では済まない。near === far の霧は補間が 0 除算になる。
+    for (const [extent, distance] of [
+      [8, Number.NaN],
+      [Number.NaN, 10],
+      [0, 10],
+      [-1, 10],
+      [8, Number.POSITIVE_INFINITY],
+    ]) {
+      const [near, far] = fogRange(extent as number, distance as number);
+      expect(Number.isFinite(near)).toBe(true);
+      expect(Number.isFinite(far)).toBe(true);
+      expect(far).toBeGreaterThan(near);
+    }
   });
 });
 

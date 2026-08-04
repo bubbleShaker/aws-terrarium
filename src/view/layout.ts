@@ -14,7 +14,7 @@ export const ACCEPTED_WIDTH = 0.5;
 export const HEIGHT_AT_HARD_CAP = 2;
 /** 粒子が降ってくる高さ。クライアント側を表す。 */
 export const SOURCE_HEIGHT = 6.5;
-/** 負荷の源のパイプが 2 つへ分かれる高さ。ここから下は左右別々の話になる。 */
+/** 負荷の源のパイプが各サービスへ分かれる高さ。ここから下は敷地ごと別々の話になる。 */
 export const SPLIT_HEIGHT = 8.2;
 /** パイプの立ち上がりの頂点。**初期画角に入る高さ**であること（分岐が見えないと並置の前提が伝わらない）。 */
 export const PIPE_TOP = 9.2;
@@ -215,33 +215,38 @@ export const CONSUMER_BANK_WIDTH = 1.8;
 export const CONSUMER_BANK_DEPTH = 0.9;
 export const CONSUMER_BANK_HEIGHT = 0.7;
 
-/** この件数までは、レーンの長さがバックログに比例する。 */
-const LANE_LINEAR_LIMIT_MESSAGES = 1_000;
-/** 上の件数のときのレーンの長さ。 */
-const LANE_LENGTH_AT_LINEAR_LIMIT = 3;
 /**
- * 上限超過ぶんの圧縮の強さ。`OVERFLOW_COMPRESSION` と同じ役割。
- * 保持 4 日 × 500 q/s の理論上限 1.7 億件でも長さ 21 に収まる値にしてある。
+ * 対数の膝の位置 (件)。ここまではほぼ件数に比例し、その先はなだらかに寝る。
+ * ⚠️ **境目ではない**（下の doc を見ること）。曲線はここでも滑らかに続いている。
  */
-const LANE_OVERFLOW_COMPRESSION = 0.35;
+const LANE_KNEE_MESSAGES = 160;
+/**
+ * レーンの伸びの速さ。1,000 件で長さ 3、
+ * 保持 4 日 × 500 q/s の理論上限 1.7 億件でも 21 に収まる値。
+ */
+const LANE_LENGTH_SCALE = 1.514;
 
 /**
  * バックログ (件) をレーンの長さに変換する。
  *
- * **`columnHeight` と同じ語彙**を意図的に使っている —
- * 一定量までは線形、超えた分は対数で圧縮する。
- * 柱で既に覚えた読み方（「まっすぐ伸びている間は素直な量、
- * 途中から伸び方が変わったら桁が違う」）をそのまま持ち込めるようにするため。
+ * ## ⚠️ 柱と違って、どこにも折れ目を作らない
  *
- * ⚠️ ただし柱と違って**境目は「壁」ではない**。SQS の入口に壁は無いので、
- * `LANE_LINEAR_LIMIT_MESSAGES` はただの目盛りの切り替え点であって、
- * そこに基準面を張ってはいけない（張ると「ここが上限」という嘘になる）。
+ * `columnHeight` は「物理上限までは線形、超えたら対数」と**わざと折る**。
+ * 折れ目が壁の在り処そのものを語るからである。
+ *
+ * **SQS に壁は無い。だから折れ目があってはいけない。**
+ * 同じ二段構えを流用すると、切り替え点に「ここで何かが起きた」という
+ * 読み方が生まれる — それは `columnHeight` が正しく語っているのと同じ読み方であり、
+ * ここでは嘘になる。実際、線形と対数を継ぐと境目で伸び率が半分に跳ね、
+ * 柱の折れ（0.87 倍）より 2 倍鋭い折れができてしまう。
+ *
+ * そこで単調で滑らかな 1 本の曲線にしてある。
+ * 目盛りが寝ていくのは「絵に収めるため」だけで、**どの点も他の点と同じ資格**である。
  */
 export function backlogLaneLength(messages: number): number {
   if (!Number.isFinite(messages) || messages <= 0) return 0;
-  const ratio = messages / LANE_LINEAR_LIMIT_MESSAGES;
-  if (ratio <= 1) return ratio * LANE_LENGTH_AT_LINEAR_LIMIT;
-  return LANE_LENGTH_AT_LINEAR_LIMIT * (1 + Math.log2(ratio) * LANE_OVERFLOW_COMPRESSION);
+  // log1p を使うのは、件数が少ないとき (1 件〜) の精度を落とさないため。
+  return LANE_LENGTH_SCALE * Math.log1p(messages / LANE_KNEE_MESSAGES);
 }
 
 /**
@@ -271,9 +276,15 @@ export function ageBarHeight(ageSeconds: number, retentionSeconds: number): numb
 
 /** 年齢の縦棒を立てる x。レーンの脇（列に重ねない）。 */
 export const AGE_BAR_OFFSET_X = LANE_WIDTH / 2 + 0.45;
+/** 年齢の縦棒の太さ。敷地の幅を勘定するのに要る。 */
+export const AGE_BAR_WIDTH = 0.22;
 
 /** SQS の敷地の寸法。**敷地の原点は consumer の設備**（列の先頭）に置く。 */
 export interface SqsSiteMetrics {
+  /**
+   * 敷地の幅。**構成物を全部包む**（`auroraSiteMetrics.width` と同じ契約）。
+   * 年齢の縦棒はレーンの外に立つので、レーンの幅ではなくそちらが幅を決める。
+   */
   readonly width: number;
   /** 現在のバックログでのレーンの長さ。 */
   readonly laneLength: number;
@@ -297,7 +308,9 @@ export function sqsSiteMetrics(backlogMessages: number): SqsSiteMetrics {
   const laneLength = backlogLaneLength(backlogMessages);
   const headZ = -CONSUMER_BANK_DEPTH / 2;
   return {
-    width: Math.max(CONSUMER_BANK_WIDTH, LANE_WIDTH),
+    // 年齢の縦棒 (`AGE_BAR_OFFSET_X`) まで含めて包む。ここを狭く申告すると、
+    // 敷地の重なりを見ているテストが**実際より細い箱**で判定することになる。
+    width: Math.max(CONSUMER_BANK_WIDTH, LANE_WIDTH, 2 * AGE_BAR_OFFSET_X + AGE_BAR_WIDTH),
     laneLength,
     headZ,
     tailZ: headZ - laneLength,
@@ -321,6 +334,9 @@ const SITE_GAP = 9;
  */
 const MIN_TERRARIUM_EXTENT = 8;
 
+/** SQS の設備と、手前の 2 敷地の奥の縁との間に空ける距離。 */
+const SQS_FRONT_CLEARANCE = 1.5;
+
 /**
  * SQS の敷地を、手前の 2 敷地より奥へ引く距離。
  *
@@ -333,14 +349,13 @@ const MIN_TERRARIUM_EXTENT = 8;
  */
 export function sqsSetback(partitionCount: number, maxConnections: number): number {
   const frontHalfDepth = Math.max(
+    // 格子の奥行きは `gridWidth` で代用している。`ceil(sqrt(n))` の格子は
+    // 常に 奥行き ≤ 幅 なので安全側にずれる（`gridDepth` は用意していない）。
     gridWidth(partitionCount) / 2,
     auroraSiteMetrics(maxConnections).depth / 2,
   );
   return frontHalfDepth + CONSUMER_BANK_DEPTH / 2 + SQS_FRONT_CLEARANCE;
 }
-
-/** SQS の設備と、手前の 2 敷地の奥の縁との間に空ける距離。 */
-const SQS_FRONT_CLEARANCE = 1.5;
 
 /**
  * 3 つの敷地の中心。**原点を空けて、左右と中央奥に置く**（弓なり配置）。
@@ -463,16 +478,19 @@ export function initialCameraPosition(extent: number): [number, number, number] 
   ];
 }
 
-/** 初期カメラから、地面のその点までの距離。霧の範囲を決めるのに使う。 */
+/**
+ * 初期カメラから、地面のその点までの距離。霧の範囲を決めるのに使う。
+ *
+ * ⚠️ ユークリッド距離である。three.js の linear fog が実際に使うのは
+ * **視線方向の深度**なので、ここの値は常に少し**大きめに出る**。
+ * 霧の濃さの見積もりとしては安全側（濃く見積もる）なので上界として正しい。
+ */
 export function distanceFromInitialCamera(extent: number, point: SitePosition): number {
   const [x, y, z] = initialCameraPosition(extent);
   return Math.hypot(x - point.x, y, z - point.z);
 }
 
-/**
- * 最奥の敷地に許す霧の濃さ。これ以上沈むと 3 つ目が背景に溶ける。
- * 手前の 2 敷地が受けている濃さ（およそ 0.15）と同じ桁に収まる値。
- */
+/** 最奥の敷地に許す霧の濃さ。これ以上沈むと 3 つ目が背景に溶ける。 */
 const MAX_FOG_AT_FARTHEST_SITE = 0.25;
 
 /**
@@ -482,17 +500,39 @@ const MAX_FOG_AT_FARTHEST_SITE = 0.25;
  *
  * M3 までは `[extent * 1.8, extent * 5]` の決め打ちで足りていた。敷地が 2 つとも
  * z=0 にあり、カメラからの距離がほぼ同じだったからである。
- * SQS を奥へ置いた瞬間にこれが壊れ、**3 つ目だけが 5 割方霧に沈む**。
+ * SQS を奥へ置いた瞬間にこれが壊れ、**3 つ目だけが 5 割方霧に沈む**（既定プリセットで 0.48）。
  *
  * かかり始める距離は据え置いて、**沈みきる距離だけを押し出す**。
- * 手前 2 敷地の空気感（M2 / M3 の見た目）を変えずに、奥の敷地を掬い上げられる。
  *
- * ⚠️ レーンの尾が霧へ溶けるのは**狙いどおり**（「端が無い」を語るのは霧である）。
- * ここで守っているのは尾ではなく、**先頭**（捌かれ、期限切れで消える場所）が読めること。
+ * ## ⚠️ これは手前の敷地にも効く（避けられない）
+ *
+ * three.js の fog はシーン全体に一律でかかるので、`far` を押し出すと
+ * **手前 2 敷地の霧も一緒に薄くなる**。既定プリセットでの実測:
+ *
+ * | 敷地の中心 | M3 (`far = 40.0`) | いま (`far = 64.0`) |
+ * |---|---|---|
+ * | DynamoDB | 0.39 | **0.20** |
+ * | Aurora | 0.39 | **0.20** |
+ * | SQS | 0.48 | 0.25 |
+ *
+ * 「奥だけを掬い上げて手前は据え置き」はできない。**空気感は全体に半分薄くなる**。
+ * それでも `near` を動かさないほうを選んでいるのは、
+ * 霧の立ち上がる位置（どこから奥が霞み始めるか）が空間の奥行き感を作っており、
+ * そこを動かすと手前 2 敷地の見え方が「薄くなる」ではなく「別物になる」ため。
+ *
+ * ⚠️ レーンの尾が霧へ溶けるのは**狙いどおり**（「端が無い」を語るのは霧である）が、
+ * その溶け方もこの押し出しで弱まっている。ここで優先して守っているのは尾ではなく、
+ * **先頭**（捌かれ、期限切れで消える場所）が読めることのほう。
+ * 尾の溶かし方は M4-2b でレーン自身の材質に持たせる（PLAN.md「M4-2b への申し送り」）。
  */
 export function fogRange(extent: number, farthestSiteDistance: number): [number, number] {
+  // ⚠️ ガードは他の関数と揃える。`far` が NaN になると fog の補間が壊れ、
+  // **シーン全体**が破綻する（レーン 1 本が消えるどころの話ではない）。
+  if (!Number.isFinite(extent) || extent <= 0) return [0, 1];
   const near = extent * 1.8;
-  const beyond = Math.max(0, farthestSiteDistance - near);
+  const beyond = Number.isFinite(farthestSiteDistance)
+    ? Math.max(0, farthestSiteDistance - near)
+    : 0;
   return [near, Math.max(extent * 5, near + beyond / MAX_FOG_AT_FARTHEST_SITE)];
 }
 
@@ -500,7 +540,7 @@ export function fogRange(extent: number, farthestSiteDistance: number): [number,
 // 粒子の縮尺（全サービス共通）
 // ────────────────────────────────────────────────────────────────
 
-/** 1 サービスあたりに描く粒子の上限。両者に同じ予算を与える。 */
+/** 1 サービスあたりに描く粒子の上限。**どのサービスにも同じ予算**を与える。 */
 export const PARTICLE_BUDGET = 480;
 /** 縮尺を量子化する梯子。1-2-5 の刻みは目盛りの慣習に合わせてある。 */
 const SCALE_MANTISSAS = [1, 2, 5];
@@ -510,10 +550,11 @@ const SCALE_MANTISSAS = [1, 2, 5];
  *
  * ## なぜ共有の負荷から決めるのか
  *
- * 縮尺を両サービスで揃えないと「同じ負荷を流している」が目で見えなくなる。
+ * 縮尺を全サービスで揃えないと「同じ負荷を流している」が目で見えなくなる。
  * 負荷ダイヤルは 1 本しかない (`TerrariumDriver`) ので、
- * **その 1 本から縮尺を導けば両者が一致することは構造的に保証される** —
+ * **その 1 本から縮尺を導けば全部が一致することは構造的に保証される** —
  * サービスごとに縮尺を持たせて「揃えるのを忘れない」と決意するより確実である。
+ * サービスが増えるほどこの差は効く（M4 では 3 つ、その先はもっと増える）。
  *
  * ## なぜ固定値にしないのか
  *
