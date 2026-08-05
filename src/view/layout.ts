@@ -279,6 +279,28 @@ export const AGE_BAR_OFFSET_X = LANE_WIDTH / 2 + 0.45;
 /** 年齢の縦棒の太さ。敷地の幅を勘定するのに要る。 */
 export const AGE_BAR_WIDTH = 0.22;
 
+/**
+ * 列の先頭の z。consumer の設備のすぐ奥の面。**ここで捌かれ、ここで期限切れが起きる**。
+ *
+ * バックログが何件でも動かない（伸びるのは尾だけ）。
+ * レーンも粒子も先頭を基準に位置を出すので、両者が同じ値を見るように切り出してある。
+ */
+export const LANE_HEAD_Z = -CONSUMER_BANK_DEPTH / 2;
+
+/**
+ * 実質の上界として扱うレーンの長さ。**バックログ 1 兆件のときの長さ**そのものである。
+ *
+ * ⚠️ 真の上界ではない。`backlogLaneLength` は**頭打ちにしない**
+ * （クランプした瞬間にレーンが「有限の器」へ化ける）ので、最大値は定義上存在しない。
+ *
+ * それでも上界として使えるのは、このモデルが 1 兆件に到達できないからである —
+ * 負荷ダイヤルの上限 60,000 件/秒を保持期間の上限 14 日ぶん積んでも 7.3e10 件で、
+ * 1 兆にはひと桁届かない。
+ *
+ * 地面をどこまで敷けばよいかを決めるのに使う。
+ */
+export const LANE_REACH_LIMIT = backlogLaneLength(1e12);
+
 /** SQS の敷地の寸法。**敷地の原点は consumer の設備**（列の先頭）に置く。 */
 export interface SqsSiteMetrics {
   /**
@@ -306,7 +328,7 @@ export interface SqsSiteMetrics {
  */
 export function sqsSiteMetrics(backlogMessages: number): SqsSiteMetrics {
   const laneLength = backlogLaneLength(backlogMessages);
-  const headZ = -CONSUMER_BANK_DEPTH / 2;
+  const headZ = LANE_HEAD_Z;
   return {
     // 年齢の縦棒 (`AGE_BAR_OFFSET_X`) まで含めて包む。ここを狭く申告すると、
     // 敷地の重なりを見ているテストが**実際より細い箱**で判定することになる。
@@ -417,6 +439,55 @@ export function terrariumExtent(partitionCount: number, maxConnections: number):
   const separation = siteSeparation(partitionCount, maxConnections);
   const widest = Math.max(gridWidth(partitionCount), auroraSiteMetrics(maxConnections).width);
   return Math.max(MIN_TERRARIUM_EXTENT, separation / 2 + widest / 2);
+}
+
+/**
+ * 地面のマス目の一辺。**グリッドを広げてもここは動かさない。**
+ *
+ * マス目は空間の縮尺を読む唯一の手がかりなので、地面を広げるついでに
+ * マス目まで伸ばすと、柱も待合室も何も変えていないのに**全部が小さくなったように見える**。
+ */
+export const GROUND_CELL_SIZE = 1;
+
+/** 地面のグリッドの寸法。`gridHelper` の引数にそのまま渡せる形。 */
+export interface GroundGrid {
+  /** 一辺の長さ。 */
+  readonly size: number;
+  /** 分割数。`size / divisions` が必ず `GROUND_CELL_SIZE` になる。 */
+  readonly divisions: number;
+}
+
+/**
+ * 地面のグリッドの寸法。**レーンの尾が地面の外へ出ないこと**が要件。
+ *
+ * ## なぜ決め打ちを捨てたのか
+ *
+ * M4-2a までは `extent * 3` の決め打ちだった。敷地が 2 つとも原点付近にあり、
+ * 地面に載るものが敷地しか無かったからである。
+ * SQS のレーンは**バックログの件数だけ奥へ伸びる**ので、これが破れた —
+ * `sqs-retention-cliff` の定常 30,000 件で尾が z = -12.85 に達し、
+ * 既定プリセットの地面（±12）を突き抜けて**列だけが虚空に浮く**。
+ *
+ * ## なぜ現在のバックログから決めないのか
+ *
+ * レーンは毎 tick 伸び縮みする。それに追随させると `gridHelper` を毎フレーム作り直すことになり、
+ * さらに**地面の広さが負荷に反応して動く**（背景が主張を始める）。
+ *
+ * 代わりに `LANE_REACH_LIMIT` — どんな件数でもレーンが超えない長さ — から決め打つ。
+ * 遠方は霧に沈むので、常に大きく敷いておいても見た目の代償が無い。
+ * むしろ**地面が霧の中まで続いている**ほうが、SQS の「端が無い」と噛み合う。
+ */
+export function groundGrid(extent: number, setback: number): GroundGrid {
+  const safeExtent = Number.isFinite(extent) && extent > 0 ? extent : MIN_TERRARIUM_EXTENT;
+  const safeSetback = Number.isFinite(setback) && setback > 0 ? setback : 0;
+  // ⚠️ 尾の位置は `setback + レーンの長さ` ではない。敷地の原点は consumer の設備で、
+  // 列の先頭がそこから `LANE_HEAD_Z` だけ奥にある。この 1 項を落とすと、
+  // いちばん伸びたときだけ尾が地面から数十センチはみ出す（`ceil` の端数で隠れることがある）。
+  const laneReach = -LANE_HEAD_Z + LANE_REACH_LIMIT;
+  // 手前 2 敷地の周りにも余白が要るので、レーンの到達点と広いほうを取る。
+  const halfSpan = Math.max(safeExtent * 1.5, safeSetback + laneReach);
+  const divisions = Math.ceil((halfSpan * 2) / GROUND_CELL_SIZE);
+  return { size: divisions * GROUND_CELL_SIZE, divisions };
 }
 
 /**

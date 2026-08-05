@@ -3,7 +3,11 @@ import type { JSX } from 'react';
 import { OrbitControls } from '@react-three/drei';
 import { Canvas } from '@react-three/fiber';
 import type { Demand, LaneKind } from '../../core/sim/demand.js';
-import type { DrivenAuroraSession, DrivenDynamoDbSession } from '../../core/scenario/driver.js';
+import type {
+  DrivenAuroraSession,
+  DrivenDynamoDbSession,
+  DrivenSqsSession,
+} from '../../core/scenario/driver.js';
 import {
   CAMERA_FOV_DEGREES,
   CAMERA_TARGET_HEIGHT,
@@ -11,20 +15,26 @@ import {
   distanceFromInitialCamera,
   fogRange,
   gridWidth,
+  groundGrid,
   initialCameraPosition,
   requestsPerParticle,
   siteOrigins,
+  sqsSetback,
   terrariumExtent,
 } from '../layout.js';
+import { BACKGROUND } from '../palette.js';
 import { AuroraParticles } from './AuroraParticles.js';
 import { AuroraSite } from './AuroraSite.js';
 import { LoadPipe } from './LoadPipe.js';
 import { PartitionColumns } from './PartitionColumns.js';
 import { RequestParticles } from './RequestParticles.js';
+import { SqsParticles } from './SqsParticles.js';
+import { SqsSite } from './SqsSite.js';
 
 interface TerrariumSceneProps {
   readonly dynamodb: DrivenDynamoDbSession;
   readonly aurora: DrivenAuroraSession;
+  readonly sqs: DrivenSqsSession;
   /** 共有の負荷ダイヤルの現在値。**粒子の縮尺はここから導く**。 */
   readonly load: Demand;
   readonly lane: LaneKind;
@@ -32,6 +42,15 @@ interface TerrariumSceneProps {
   readonly dynamoDbGeneration: number;
   /** writer を作り直した回数。待ち行列がリセットされた合図。 */
   readonly auroraGeneration: number;
+  /**
+   * キューを作り直した回数。
+   *
+   * ⚠️ **上がるのはプリセットを読み込んだときだけ**である。consumer 数や保持期間を
+   * 変えてもキューは作り直されない（`SqsLiveSession` の解説を参照）。
+   * ここで作り直してしまうと、SQS の唯一にして最大の利点 —
+   * 溜めておいて後から捌ける — が「溜めたものが無かったことになる」に化ける。
+   */
+  readonly sqsGeneration: number;
 }
 
 /**
@@ -70,10 +89,12 @@ interface TerrariumSceneProps {
 export function TerrariumScene({
   dynamodb,
   aurora,
+  sqs,
   load,
   lane,
   dynamoDbGeneration,
   auroraGeneration,
+  sqsGeneration,
 }: TerrariumSceneProps): JSX.Element {
   const partitionCount = dynamodb.table.partitionCount;
   const maxConnections = aurora.writer.maxConnections;
@@ -102,10 +123,18 @@ export function TerrariumScene({
   // 決め打ちの `[extent * 1.8, extent * 5]` では**3 つ目だけが 5 割方沈む**。
   const [fogNear, fogFar] = fogRange(extent, distanceFromInitialCamera(extent, origins.sqs));
 
+  // 地面はレーンが到達しうる長さから決める。現在のバックログに追随させると、
+  // `gridHelper` を毎フレーム作り直すうえ、背景（地面の広さ）が負荷に反応して動く。
+  const ground = groundGrid(extent, sqsSetback(partitionCount, maxConnections));
+
   return (
     <Canvas camera={camera} dpr={[1, 1.75]}>
-      <color attach="background" args={['#080b12']} />
-      <fog attach="fog" args={['#080b12', fogNear, fogFar]} />
+      {/*
+        空の色は palette から取る。⚠️ ここに色を直接書くと、SQS のレーンの尾が
+        溶ける先（`BACKGROUND` へ lerp している）とずれ、**尾だけが違う色の帯**として残る。
+      */}
+      <color attach="background" args={[BACKGROUND]} />
+      <fog attach="fog" args={[BACKGROUND, fogNear, fogFar]} />
 
       <ambientLight intensity={0.55} />
       <directionalLight position={[6, 12, 8]} intensity={1.1} />
@@ -147,7 +176,20 @@ export function TerrariumScene({
         />
       </group>
 
-      <gridHelper args={[extent * 3, 24, '#1b2634', '#121a24']} position={[0, -0.01, 0]} />
+      <group position={[origins.sqs.x, 0, origins.sqs.z]}>
+        {/* 作り直しはプリセットの読み込みだけ（consumer を増やしてもバックログは持ち越す）。 */}
+        <SqsSite key={`sqs-site-${sqsGeneration}`} session={sqs} />
+        <SqsParticles key={`sqs-particles-${sqsGeneration}`} session={sqs} requestsPerParticle={scale} />
+      </group>
+
+      {/*
+        地面。⚠️ `extent * 3` の決め打ちに戻さないこと。
+        レーンはバックログの件数だけ奥へ伸びるので、30,000 件で地面の外へ出る。
+      */}
+      <gridHelper
+        args={[ground.size, ground.divisions, '#1b2634', '#121a24']}
+        position={[0, -0.01, 0]}
+      />
 
       <OrbitControls
         makeDefault

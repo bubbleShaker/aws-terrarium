@@ -99,3 +99,85 @@ export const SEAT_TAKEN = new Color('#e8b23c');
 export const GATE_IDLE = new Color('#1f3a4d');
 export const GATE_BUSY = new Color('#5ef2c0');
 
+/** 空の色。**レーンの尾はここへ溶ける**ので、背景と同じ値であることが要る。 */
+export const BACKGROUND = new Color('#080b12');
+
+/**
+ * SQS のバックログ（レーン本体）の色。
+ *
+ * ## ⚠️ 何件溜まっても変わらない。**これが SQS の主張そのもの**
+ *
+ * DynamoDB の赤熱は「需要が物理上限を越えている」、Aurora の待ち色は「待たされている」を
+ * 語っている。どちらも**いま悪いことが起きている指標**に紐づいた色である。
+ *
+ * SQS にはその指標が存在しない。バックログが 30 万件あっても、
+ * エラー率もレイテンシもスループットも健全な値を出し続ける
+ * （`rejectedMessagesPerSec` は構造的に常に 0）。
+ * ここでレーンを負荷や件数で色づけた瞬間、M4 の看板
+ * 「**溜める。何も起きない**」が絵の上で嘘になる。
+ *
+ * 変化を語るのは長さ（どれだけ溜まったか）と、隣の年齢バー（唯一の警報）だけ。
+ */
+export const LANE_BODY = new Color('#3f7fb8');
+
+/**
+ * 最古メッセージの年齢を色にする。**保持期間に対する比**で塗る。
+ *
+ * DynamoDB の赤熱とも Aurora の待ち色とも別の尺度である（M3 で `waitColor` を
+ * `heatColor` から分けたのと同じ理由 — 意味の違うものを同じ色で塗ると、
+ * 並べたときに壊れ方の違いが消える）。
+ *
+ * ## ⚠️ 振り切った先を赤にしない
+ *
+ * 赤は 3 つの敷地を通じて「**弾かれた**」に割り当ててある。
+ * SQS の消失はエラーを伴わない — `Too many connections` も
+ * `ProvisionedThroughputExceededException` も出ないまま、ただ消える。
+ * 同じ赤で塗ると、SQS で最も伝えたい
+ * 「**エラーを伴わない唯一のデータ損失**」が「よくある拒否」に見えてしまう。
+ *
+ * 別系統の色（マゼンタ）にしてあるのは、
+ * **エラーとは違う種類の悪いこと**が起きていると分かるようにするため。
+ */
+const AGE_STOPS: { at: number; color: Color }[] = [
+  { at: 0, color: new Color('#2b3f63') }, // まだ新しい
+  { at: 0.5, color: new Color('#d9a441') }, // 保持期間の半分を過ぎた
+  { at: 0.9, color: new Color('#ff7a3d') }, // 消え始める直前
+  { at: 1, color: new Color('#c04ee0') }, // 消えている（エラーの赤とは別系統）
+];
+
+export function ageColor(retentionUtilization: number, target: Color): Color {
+  const first = AGE_STOPS[0];
+  const last = AGE_STOPS[AGE_STOPS.length - 1];
+  if (first === undefined || last === undefined) return target.set('#ffffff');
+
+  // NaN は「振り切っている」側へ倒す（消失を静かに見逃すより安全）。
+  const u = Number.isFinite(retentionUtilization) ? Math.max(0, retentionUtilization) : last.at;
+  if (u >= last.at) return target.copy(last.color);
+
+  for (let i = 1; i < AGE_STOPS.length; i += 1) {
+    const prev = AGE_STOPS[i - 1];
+    const next = AGE_STOPS[i];
+    if (prev === undefined || next === undefined) break;
+    if (u <= next.at) {
+      const t = (u - prev.at) / (next.at - prev.at);
+      return target.copy(prev.color).lerp(next.color, t);
+    }
+  }
+  return target.copy(last.color);
+}
+
+/**
+ * consumer の設備。**稼働率で光る**。
+ *
+ * ⚠️ Aurora の窓口 (`GATE_*`) と違い、consumer の数は壁ではない。
+ * あちらは vCPU 2 本という**動かせない本数**が壁そのものだったが、
+ * SQS の consumer は好きなだけ増やせる（増やすのが正しい手である）。
+ * だから窓口の本数として描かない — 本数を並べると Aurora と同じ壁に見える。
+ *
+ * 唯一の壁は in-flight 約 120,000 件で、そこに当たったときだけ色で知らせる。
+ */
+export const CONSUMER_IDLE = new Color('#233b46');
+export const CONSUMER_BUSY = new Color('#5ef2c0');
+/** in-flight 上限に当たっている。**consumer を増やしても消化レートが伸びない領域**。 */
+export const CONSUMER_LIMITED = new Color('#e8b23c');
+

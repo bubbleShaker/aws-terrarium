@@ -14,6 +14,7 @@ import {
   vcpuGatePositions,
 } from '../layout.js';
 import { GATE_BUSY, GATE_IDLE, SEAT_EMPTY, SEAT_TAKEN, waitColor } from '../palette.js';
+import { paintMesh } from './paint.js';
 
 interface AuroraSiteProps {
   readonly session: DrivenAuroraSession;
@@ -170,11 +171,7 @@ function RoomFloor({ session }: { readonly session: DrivenAuroraSession }): JSX.
   useFrame(() => {
     const mesh = ref.current;
     if (mesh === null) return;
-    // 1 枚しかないので instancing は要らない。マテリアルの色を差し替えるだけで済む。
-    const material = mesh.material;
-    if (!Array.isArray(material) && 'color' in material) {
-      (material.color as Color).copy(waitColor(session.latest?.latencySeconds ?? 0, color));
-    }
+    paintMesh(mesh, waitColor(session.latest?.latencySeconds ?? 0, color));
   });
 
   return (

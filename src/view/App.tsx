@@ -34,9 +34,6 @@ export function App(): JSX.Element {
         load: defaultTerrariumPreset.load,
         dynamodb: defaultTerrariumPreset.dynamodb,
         aurora: defaultTerrariumPreset.aurora,
-        // M4-1 時点では画面に出していない（3D と HUD は M4-2）。
-        // それでも driver に載せてあるのは、**プリセットが全サービスを同時に戻す**という
-        // 不変条件を、描画より先に成立させておくためである。
         sqs: defaultTerrariumPreset.sqs,
       }),
   );
@@ -125,10 +122,12 @@ export function App(): JSX.Element {
       <TerrariumScene
         dynamodb={driver.dynamodb}
         aurora={driver.aurora}
+        sqs={driver.sqs}
         load={snapshot.load}
         lane={lane}
         dynamoDbGeneration={driver.dynamodb.generation}
         auroraGeneration={driver.aurora.generation}
+        sqsGeneration={driver.sqs.generation}
       />
 
       <div className="rail rail--left">
