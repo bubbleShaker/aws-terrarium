@@ -280,12 +280,22 @@ export const AGE_BAR_OFFSET_X = LANE_WIDTH / 2 + 0.45;
 export const AGE_BAR_WIDTH = 0.22;
 
 /**
- * レーンが到達しうる長さの上界。
+ * 列の先頭の z。consumer の設備のすぐ奥の面。**ここで捌かれ、ここで期限切れが起きる**。
  *
- * `backlogLaneLength` は**頭打ちにしない**（クランプした瞬間にレーンが「有限の器」へ化ける）
- * ので厳密な最大値は存在しないが、対数なので件数が桁で増えても長さはほとんど伸びない。
- * バックログ 1 兆件 — このモデルの負荷上限 60,000 件/秒を保持期間の上限 14 日ぶん
- * 積み続けても届かない量 — でこの値を下回る。
+ * バックログが何件でも動かない（伸びるのは尾だけ）。
+ * レーンも粒子も先頭を基準に位置を出すので、両者が同じ値を見るように切り出してある。
+ */
+export const LANE_HEAD_Z = -CONSUMER_BANK_DEPTH / 2;
+
+/**
+ * 実質の上界として扱うレーンの長さ。**バックログ 1 兆件のときの長さ**そのものである。
+ *
+ * ⚠️ 真の上界ではない。`backlogLaneLength` は**頭打ちにしない**
+ * （クランプした瞬間にレーンが「有限の器」へ化ける）ので、最大値は定義上存在しない。
+ *
+ * それでも上界として使えるのは、このモデルが 1 兆件に到達できないからである —
+ * 負荷ダイヤルの上限 60,000 件/秒を保持期間の上限 14 日ぶん積んでも 7.3e10 件で、
+ * 1 兆にはひと桁届かない。
  *
  * 地面をどこまで敷けばよいかを決めるのに使う。
  */
@@ -318,7 +328,7 @@ export interface SqsSiteMetrics {
  */
 export function sqsSiteMetrics(backlogMessages: number): SqsSiteMetrics {
   const laneLength = backlogLaneLength(backlogMessages);
-  const headZ = -CONSUMER_BANK_DEPTH / 2;
+  const headZ = LANE_HEAD_Z;
   return {
     // 年齢の縦棒 (`AGE_BAR_OFFSET_X`) まで含めて包む。ここを狭く申告すると、
     // 敷地の重なりを見ているテストが**実際より細い箱**で判定することになる。
@@ -470,8 +480,12 @@ export interface GroundGrid {
 export function groundGrid(extent: number, setback: number): GroundGrid {
   const safeExtent = Number.isFinite(extent) && extent > 0 ? extent : MIN_TERRARIUM_EXTENT;
   const safeSetback = Number.isFinite(setback) && setback > 0 ? setback : 0;
+  // ⚠️ 尾の位置は `setback + レーンの長さ` ではない。敷地の原点は consumer の設備で、
+  // 列の先頭がそこから `LANE_HEAD_Z` だけ奥にある。この 1 項を落とすと、
+  // いちばん伸びたときだけ尾が地面から数十センチはみ出す（`ceil` の端数で隠れることがある）。
+  const laneReach = -LANE_HEAD_Z + LANE_REACH_LIMIT;
   // 手前 2 敷地の周りにも余白が要るので、レーンの到達点と広いほうを取る。
-  const halfSpan = Math.max(safeExtent * 1.5, safeSetback + LANE_REACH_LIMIT);
+  const halfSpan = Math.max(safeExtent * 1.5, safeSetback + laneReach);
   const divisions = Math.ceil((halfSpan * 2) / GROUND_CELL_SIZE);
   return { size: divisions * GROUND_CELL_SIZE, divisions };
 }

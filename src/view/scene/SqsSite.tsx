@@ -10,11 +10,10 @@ import {
   CONSUMER_BANK_HEIGHT,
   CONSUMER_BANK_WIDTH,
   HEIGHT_AT_HARD_CAP,
+  LANE_HEAD_Z,
   LANE_WIDTH,
   ageBarHeight,
   backlogLaneLength,
-  damp,
-  sqsSiteMetrics,
 } from '../layout.js';
 import {
   BACKGROUND,
@@ -24,6 +23,7 @@ import {
   LANE_BODY,
   ageColor,
 } from '../palette.js';
+import { paintMesh } from './paint.js';
 
 interface SqsSiteProps {
   readonly session: DrivenSqsSession;
@@ -78,14 +78,6 @@ export function SqsSite({ session }: SqsSiteProps): JSX.Element {
 
   const scratch = useMemo(() => ({ color: new Color() }), []);
 
-  /**
-   * 列の先頭の z。**バックログの件数に依らない**（伸びるのは尾だけ）ので、
-   * 引数は何を渡しても同じ値が返る。0 を渡しているのは「件数に依らない」ことの表明。
-   *
-   * 尾の位置は毎フレーム変わるため、`sqsSiteMetrics` の `tailZ` / `laneZ` は使わない
-   * （こちらは追従を挟んだ表示中の長さから出す。tick の跳ねをそのまま入れると列が痙攣する）。
-   */
-  const headZ = useMemo(() => sqsSiteMetrics(0).headZ, []);
 
   /**
    * レーンの板。**尾へ向かって背景色へ沈む**グラデーションを 1 回だけ焼き込む。
@@ -140,10 +132,7 @@ export function SqsSite({ session }: SqsSiteProps): JSX.Element {
   useEffect(() => () => bankBox.dispose(), [bankBox]);
   useEffect(() => () => retentionMark.dispose(), [retentionMark]);
 
-  // 表示中の長さ・高さ。tick ごとに跳ねる値をそのまま入れると列が痙攣するので追従させる。
-  const smoothed = useRef({ laneLength: 0, ageHeight: 0 });
-
-  useFrame((_, delta) => {
+  useFrame(() => {
     const lane = laneRef.current;
     const bank = bankRef.current;
     const ageBar = ageBarRef.current;
@@ -157,12 +146,19 @@ export function SqsSite({ session }: SqsSiteProps): JSX.Element {
     // 掴んで処理している最中のもので、もう列には並んでいない
     // （CloudWatch でも `ApproximateNumberOfMessagesVisible` と
     // `ApproximateNumberOfMessagesNotVisible` は別の指標である）。
-    const backlog = latest?.backlogVisible ?? queue.queueDepth;
-    const laneLength = damp(smoothed.current.laneLength, backlogLaneLength(backlog), 6, delta);
-    smoothed.current.laneLength = laneLength;
+    //
+    // ⚠️ **ここに `damp` を挟んではいけない。**
+    // 粒子（`SqsParticles`）は同じ長さから着地点を出しており、
+    // 片方だけ追従を挟むと**同じ関数を同じ入力で呼んでいるのに値が食い違う** —
+    // 負荷を跳ね上げた直後の 0.5 秒ほど、粒子が板の外の虚空へ降ることになる。
+    //
+    // 柱 (`PartitionColumns`) が追従を要るのは、あちらが描いているのが
+    // **レート**（tick ごとに跳ねる量）だからである。こちらが描いているのは
+    // バックログという**ストック**で、到着と消化の積分なので跳ねようがない。
+    const laneLength = backlogLaneLength(latest?.backlogVisible ?? 0);
 
     lane.scale.set(1, Math.max(1e-4, laneLength), 1);
-    lane.position.set(0, LANE_LIFT, headZ - laneLength / 2);
+    lane.position.set(0, LANE_LIFT, LANE_HEAD_Z - laneLength / 2);
     lane.visible = laneLength > 1e-3;
 
     // ── consumer: 稼働率で光る。**本数は描かない**（本数は壁ではない） ──
@@ -172,21 +168,19 @@ export function SqsSite({ session }: SqsSiteProps): JSX.Element {
     // in-flight 上限に当たっている間は、consumer を増やしても消化レートが伸びない。
     // SQS で唯一の壁なので、そこだけは色を変えて知らせる。
     const busy = queue.inFlightLimited ? CONSUMER_LIMITED : CONSUMER_BUSY;
-    paint(bank, color.copy(CONSUMER_IDLE).lerp(busy, busyRatio));
+    paintMesh(bank, color.copy(CONSUMER_IDLE).lerp(busy, busyRatio));
 
     // ── 年齢の縦棒: 唯一の警報 ──
-    const ageHeight = damp(
-      smoothed.current.ageHeight,
-      ageBarHeight(latest?.oldestMessageAgeSeconds ?? 0, queue.messageRetentionSeconds),
-      6,
-      delta,
-    );
-    smoothed.current.ageHeight = ageHeight;
+    // 年齢もストック（先頭が待っている時間）なので、レーンと同じく追従は要らない。
     // ⚠️ 高さは `ageBarHeight` が保持期間 100% で頭打ちにしている。柱と違って
     // **決して突き抜けない** — 保持期間を超えたメッセージはもう存在しないからである。
+    const ageSeconds = latest?.oldestMessageAgeSeconds ?? 0;
+    const ageHeight = ageBarHeight(ageSeconds, queue.messageRetentionSeconds);
     ageBar.scale.set(1, Math.max(1e-4, ageHeight), 1);
-    ageBar.position.set(AGE_BAR_OFFSET_X, ageHeight / 2, headZ);
-    paint(ageBar, ageColor(latest?.retentionUtilization ?? 0, color));
+    ageBar.position.set(AGE_BAR_OFFSET_X, ageHeight / 2, LANE_HEAD_Z);
+    // 高さと同じ量から色を作る（`retentionUtilization` を別に読むと、
+    // クランプの掛かる 100% 付近で高さと色が違う瞬間を語り始める）。
+    paintMesh(ageBar, ageColor(ageHeight / HEIGHT_AT_HARD_CAP, color));
   });
 
   return (
@@ -224,7 +218,7 @@ export function SqsSite({ session }: SqsSiteProps): JSX.Element {
         3 つの敷地で「この高さが壁」が揃う。
         ただしこちらの壁は越えられるのではなく、**越える前に消える**。
       */}
-      <lineSegments position={[AGE_BAR_OFFSET_X, HEIGHT_AT_HARD_CAP, headZ]}>
+      <lineSegments position={[AGE_BAR_OFFSET_X, HEIGHT_AT_HARD_CAP, LANE_HEAD_Z]}>
         <edgesGeometry args={[retentionMark]} />
         <lineBasicMaterial color="#c04ee0" transparent opacity={0.55} />
       </lineSegments>
@@ -232,8 +226,3 @@ export function SqsSite({ session }: SqsSiteProps): JSX.Element {
   );
 }
 
-/** マテリアルの色を差し替える。1 枚しかない物に instancing は要らない。 */
-function paint(mesh: Mesh, color: Color): void {
-  const material = mesh.material;
-  if (!Array.isArray(material) && 'color' in material) (material.color as Color).copy(color);
-}

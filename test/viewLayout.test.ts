@@ -628,6 +628,18 @@ describe('siteOrigins（3 敷地・弓なり配置）', () => {
  * M4-2a の申し送り 2 — レーンが地面の外へ出る — への回答である。
  * 背景の話に見えるが、**列だけが虚空に浮いていたら「溜まっている」が場所として読めない**。
  */
+/**
+ * 空間の原点から、レーンの尾までの距離。
+ *
+ * ⚠️ `setback + backlogLaneLength(件数)` と書いてはいけない。敷地の原点は
+ * consumer の設備で、列の先頭はそこから `LANE_HEAD_Z` だけ奥にある。
+ * 式を書き写すとその 1 項が落ち、**地面のはみ出しをテスト自身が見逃す**。
+ * 寸法を `sqsSiteMetrics` に出させれば、レーンの構造が変わっても自動で追従する。
+ */
+function tailDistanceFromOrigin(setback: number, backlog: number): number {
+  return Math.abs(-setback + sqsSiteMetrics(backlog).tailZ);
+}
+
 describe('groundGrid', () => {
   it('マス目の一辺は広げても動かない（空間の縮尺が変わって見えないこと）', () => {
     for (const partitions of [1, 25, 50]) {
@@ -645,10 +657,10 @@ describe('groundGrid', () => {
     // （画面がいちばん盛り上がる瞬間に、列だけが虚空へ伸びていく）。
     const extent = terrariumExtent(1, 1_000);
     const setback = sqsSetback(1, 1_000);
-    const tailZ = setback + backlogLaneLength(30_000);
+    const tailReach = tailDistanceFromOrigin(setback, 30_000);
 
-    expect(tailZ).toBeGreaterThan((extent * 3) / 2);
-    expect(tailZ).toBeLessThan(groundGrid(extent, setback).size / 2);
+    expect(tailReach).toBeGreaterThan((extent * 3) / 2);
+    expect(tailReach).toBeLessThanOrEqual(groundGrid(extent, setback).size / 2);
   });
 
   it('どんなバックログでもレーンの尾が地面に載る', () => {
@@ -660,7 +672,7 @@ describe('groundGrid', () => {
 
         // 1 兆件 — 負荷上限 60,000 件/秒を保持上限 14 日ぶん積んでも届かない量。
         for (const backlog of [1_000, 30_000, 172_800_000, 1e12]) {
-          expect(setback + backlogLaneLength(backlog)).toBeLessThanOrEqual(halfSpan);
+          expect(tailDistanceFromOrigin(setback, backlog)).toBeLessThanOrEqual(halfSpan);
         }
       }
     }

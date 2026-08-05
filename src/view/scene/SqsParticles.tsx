@@ -5,12 +5,12 @@ import type { BufferAttribute, Points } from 'three';
 import type { DrivenSqsSession } from '../../core/scenario/driver.js';
 import { Rng } from '../../core/sim/rng.js';
 import {
+  LANE_HEAD_Z,
   LANE_WIDTH,
   PARTICLE_BUDGET,
   SOURCE_HEIGHT,
   backlogLaneLength,
   particleCount,
-  sqsSiteMetrics,
 } from '../layout.js';
 
 interface SqsParticlesProps {
@@ -77,8 +77,6 @@ export function SqsParticles({ session, requestsPerParticle }: SqsParticlesProps
   const positionsRef = useRef<BufferAttribute>(null);
   const colorsRef = useRef<BufferAttribute>(null);
 
-  const headZ = useMemo(() => sqsSiteMetrics(0).headZ, []);
-
   const state = useMemo(() => {
     const positions = new Float32Array(PARTICLE_BUDGET * 3);
     const colors = new Float32Array(PARTICLE_BUDGET * 3);
@@ -118,10 +116,12 @@ export function SqsParticles({ session, requestsPerParticle }: SqsParticlesProps
     const dt = Math.min(delta, 0.1); // タブ復帰時に瞬間移動しないよう頭を押さえる
     const latest = session.latest;
 
-    // 列の長さ。粒子の着地点はここで決まるので、レーンと同じ関数から出す
+    // 列の長さ。粒子の着地点はここで決まるので、**レーンと同じ関数を同じ入力で**呼ぶ
     // （別々に計算すると、粒子が板の上ではなく虚空に降り始める）。
-    const laneLength = backlogLaneLength(latest?.backlogVisible ?? session.queue.queueDepth);
-    const tailZ = headZ - laneLength;
+    // ⚠️ `SqsSite` 側で追従 (`damp`) を挟むと、同じ式でも値が食い違って同じ症状が出る。
+    // 向こうにその旨を書いてある。
+    const laneLength = backlogLaneLength(latest?.backlogVisible ?? 0);
+    const tailZ = LANE_HEAD_Z - laneLength;
 
     // 列を渡りきる時間。長さが対数で圧縮されているので、時間も長さから出す。
     const transitSeconds = Math.min(
@@ -202,7 +202,7 @@ export function SqsParticles({ session, requestsPerParticle }: SqsParticlesProps
         fadeLife[i] = expired ? FADE_SECONDS : CONSUMED_SECONDS;
         pos[i3] = lane;
         pos[i3 + 1] = 0.22;
-        pos[i3 + 2] = headZ;
+        pos[i3 + 2] = LANE_HEAD_Z;
         continue;
       }
       progress[i] = t;
@@ -210,7 +210,7 @@ export function SqsParticles({ session, requestsPerParticle }: SqsParticlesProps
       const crossed = t - 1;
       pos[i3] = lane;
       pos[i3 + 1] = 0.22;
-      pos[i3 + 2] = tailZ + (headZ - tailZ) * crossed;
+      pos[i3 + 2] = tailZ + (LANE_HEAD_Z - tailZ) * crossed;
       colors[i3] = QUEUED[0];
       colors[i3 + 1] = QUEUED[1];
       colors[i3 + 2] = QUEUED[2];
